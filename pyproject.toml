@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-raycaster"
+version = "0.1.0"
+description = "A simple raycaster based on warp. Supports multiple and dynamic meshes."
+authors = [
+    { name="Botian Xu", email="botianxu@gmail.com" }
+]
+requires-python = ">=3.8"
+dependencies = [
+    "trimesh",
+    "warp-lang",
+    "fast_simplification",
+]
+
+[project.urls]
+"Source Code" = "https://github.com/btx0424/simple-raycaster"
+
+[tool.setuptools.packages.find]
+where = ["src"]
