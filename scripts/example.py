@@ -60,11 +60,12 @@ if __name__ == "__main__":
         [path_regex],
         stage=stage,
         device=device,
+        simplify_factor=0.5,
     )
     print(raycaster)
 
     horizontal_angles = torch.linspace(-torch.pi / 4, torch.pi / 4, 20)
-    vertical_angles = torch.linspace(-torch.pi / 6, torch.pi / 6, 10) - torch.pi / 2
+    vertical_angles = torch.linspace(-torch.pi / 6, torch.pi / 6, 10)
     hh, vv = torch.meshgrid(horizontal_angles, vertical_angles)
 
     ray_dirs = torch.stack([
@@ -77,8 +78,8 @@ if __name__ == "__main__":
     ray_starts = torch.zeros(ray_dirs.shape[0], 3, device=device)
     ray_dirs = ray_dirs / torch.norm(ray_dirs, dim=1, keepdim=True)
 
-    ray_starts[:, 2] = 1.0
-    # ray_dirs[:, 0] = - ray_dirs[:, 0].abs()
+    ray_starts[:, 0] = 1.0
+    ray_dirs[:, 0] = - ray_dirs[:, 0].abs()
 
     translations = torch.from_numpy(np.stack(translations, axis=0)).float().to(device)
     quats = torch.from_numpy(np.stack(quats, axis=0)).float().to(device)

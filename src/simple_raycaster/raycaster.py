@@ -48,12 +48,21 @@ class MultiMeshRaycaster:
     """
     def __init__(self, meshes: list[wp.Mesh], device: str):
         self.meshes = meshes
-        self.n_meshes = len(meshes)
         self.meshes_array = wp.array([mesh.id for mesh in meshes], dtype=wp.uint64)
         self.device = device
-
-        self.n_points = sum(mesh.points.shape[0] for mesh in meshes)
-        self.n_faces = sum(mesh.indices.reshape((-1, 3)).shape[0] for mesh in meshes)
+        self.mesh_names = None
+    
+    @property
+    def n_points(self):
+        return sum(mesh.points.shape[0] for mesh in self.meshes)
+    
+    @property
+    def n_faces(self):
+        return sum(mesh.indices.reshape((-1, 3)).shape[0] for mesh in self.meshes)
+    
+    @property
+    def n_meshes(self):
+        return len(self.meshes)
     
     def __repr__(self) -> str:
         return f"MultiMeshRaycaster(n_meshes={self.n_meshes}, n_points={self.n_points}, n_faces={self.n_faces})"
@@ -103,30 +112,35 @@ class MultiMeshRaycaster:
             paths: List of prim paths (can be regex) to find, e.g. ["World/.*/visuals"].
             stage: The USD stage to search in.
             device: The device to use for the raycaster.
-            simplify_factor: The factor to simplify the meshes. 0.0 means no simplification.
+            simplify_factor: The factor to simplify the meshes. 0.0 means no simplification. 
+                If a single float is provided, it will be used for all meshes.
         """
-        meshes_wp = []
-        all_prims = []
-        for path in paths:
-            if not (prims := find_matching_prims(path, stage)):
-                raise ValueError(f"No prims found for path {path}")
-            all_prims.extend(prims)
+        if isinstance(simplify_factor, float):
+            simplify_factor = [simplify_factor] * len(paths)
+        if not len(paths) == len(simplify_factor):
+            raise ValueError("`simplify_factor` must be a single float or a list of floats with the same length as `paths`")
         
+        meshes_wp = []
+
         n_faces_before = 0
         n_faces_after = 0
-        for prim in all_prims:
-            mesh_prims = get_mesh_prims_subtree(prim)
-            meshes_trimesh = []
-            for mesh_prim in mesh_prims:
-                mesh = usd2trimesh(mesh_prim)
-                n_faces_before += mesh.faces.shape[0]
-                if simplify_factor > 0.0:
-                    mesh = mesh.simplify_quadric_decimation(simplify_factor)
-                n_faces_after += mesh.faces.shape[0]
-                meshes_trimesh.append(mesh)
-            mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(meshes_trimesh)
-            mesh_combined.merge_vertices()
-            meshes_wp.append(trimesh2wp(mesh_combined, device))
+        for path, factor in zip(paths, simplify_factor):
+            if not (prims := find_matching_prims(path, stage)):
+                raise ValueError(f"No prims found for path {path}")
+            
+            for prim in prims:
+                mesh_prims = get_mesh_prims_subtree(prim)
+                meshes_trimesh = []
+                for mesh_prim in mesh_prims:
+                    mesh = usd2trimesh(mesh_prim)
+                    n_faces_before += mesh.faces.shape[0]
+                    if factor > 0.0:
+                        mesh = mesh.simplify_quadric_decimation(factor)
+                    n_faces_after += mesh.faces.shape[0]
+                    meshes_trimesh.append(mesh)
+                mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(meshes_trimesh)
+                mesh_combined.merge_vertices()
+                meshes_wp.append(trimesh2wp(mesh_combined, device))
         
         if n_faces_before != n_faces_after:
             print(f"Simplified {n_faces_before} to {n_faces_after} faces")
