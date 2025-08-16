@@ -1,16 +1,16 @@
-import trimesh
 import numpy as np
-import warp as wp
 import torch
+import trimesh
+import warp as wp
 
 from pxr import Usd
 
 from .utils import (
-    quat_rotate_inverse,
     find_matching_prims,
     get_mesh_prims_subtree,
-    usd2trimesh,
+    quat_rotate_inverse,
     trimesh2wp,
+    usd2trimesh,
 )
 
 
@@ -19,6 +19,7 @@ def multi_mesh_raycast_kernel(
     meshes: wp.array(dtype=wp.uint64),
     ray_starts: wp.array(dtype=wp.vec3, ndim=3),
     ray_dirs: wp.array(dtype=wp.vec3, ndim=3),
+    min_dist: float,
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=3),
 ):
@@ -32,10 +33,9 @@ def multi_mesh_raycast_kernel(
         ray_dir,
         max_dist,
     )
-    if result.result:
+    t = max_dist
+    if result.result and result.t >= min_dist:
         t = result.t
-    else:
-        t = max_dist
     hit_distances[i, mesh_id, ray_id] = t
 
 
@@ -46,49 +46,59 @@ class MultiMeshRaycaster:
     Args:
         meshes: List of wp.Mesh objects.
     """
+
     def __init__(self, meshes: list[wp.Mesh], device: str):
         self.meshes = meshes
-        self.meshes_array = wp.array([mesh.id for mesh in meshes], dtype=wp.uint64)
+        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], dtype=wp.uint64)
         self.device = device
         self.mesh_names = None
     
+    def add_mesh(self, mesh):
+        if isinstance(mesh, trimesh.Trimesh):
+            mesh = trimesh2wp(mesh, self.device)
+        self.meshes.append(mesh)
+        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], dtype=wp.uint64)
+
     @property
     def n_points(self):
         return sum(mesh.points.shape[0] for mesh in self.meshes)
-    
+
     @property
     def n_faces(self):
         return sum(mesh.indices.reshape((-1, 3)).shape[0] for mesh in self.meshes)
-    
+
     @property
     def n_meshes(self):
         return len(self.meshes)
-    
+
     def __repr__(self) -> str:
         return f"MultiMeshRaycaster(n_meshes={self.n_meshes}, n_points={self.n_points}, n_faces={self.n_faces})"
 
     def raycast(
         self,
-        mesh_pos_w: torch.Tensor, # [N, n_meshes, 3]
-        mesh_quat_w: torch.Tensor, # [N, n_meshes, 4]
-        ray_starts_w: torch.Tensor, # [N, n_rays, 3]
-        ray_dirs_w: torch.Tensor, # [N, n_rays, 3]
-        max_dist: float=100.0,
+        mesh_pos_w: torch.Tensor,  # [N, n_meshes, 3]
+        mesh_quat_w: torch.Tensor,  # [N, n_meshes, 4]
+        ray_starts_w: torch.Tensor,  # [N, n_rays, 3]
+        ray_dirs_w: torch.Tensor,  # [N, n_rays, 3]
+        min_dist: float = 0.0,
+        max_dist: float = 100.0,
     ):
         n_rays = ray_dirs_w.shape[1]
         N = mesh_pos_w.shape[0]
-        mesh_pos_w = mesh_pos_w.reshape(N, self.n_meshes, 1, 3) # [N, n_meshes, 1, 3]
-        mesh_quat_w = mesh_quat_w.reshape(N, self.n_meshes, 1, 4) # [N, n_meshes, 1, 4]
-        _ray_starts_w = ray_starts_w.reshape(N, 1, n_rays, 3) # [N, 1, n_rays, 3]
-        _ray_dirs_w = ray_dirs_w.reshape(N, 1, n_rays, 3) # [N, 1, n_rays, 3]
-        
+        mesh_pos_w = mesh_pos_w.reshape(N, self.n_meshes, 1, 3)  # [N, n_meshes, 1, 3]
+        mesh_quat_w = mesh_quat_w.reshape(N, self.n_meshes, 1, 4)  # [N, n_meshes, 1, 4]
+        _ray_starts_w = ray_starts_w.reshape(N, 1, n_rays, 3)  # [N, 1, n_rays, 3]
+        _ray_dirs_w = ray_dirs_w.reshape(N, 1, n_rays, 3)  # [N, 1, n_rays, 3]
+
         # convert to mesh frame
         ray_starts_b = quat_rotate_inverse(mesh_quat_w, _ray_starts_w - mesh_pos_w)
         ray_dirs_b = quat_rotate_inverse(mesh_quat_w, _ray_dirs_w)
 
         ray_starts_wp = wp.from_torch(ray_starts_b, dtype=wp.vec3, return_ctype=True)
         ray_dirs_wp = wp.from_torch(ray_dirs_b, dtype=wp.vec3, return_ctype=True)
-        hit_distances = torch.empty(N, self.n_meshes, n_rays, device=ray_starts_w.device)
+        hit_distances = torch.empty(
+            N, self.n_meshes, n_rays, device=ray_starts_w.device
+        )
         launch: wp.Launch = wp.launch(
             multi_mesh_raycast_kernel,
             dim=(N, self.n_meshes, n_rays),
@@ -96,30 +106,41 @@ class MultiMeshRaycaster:
                 self.meshes_array,
                 ray_starts_wp,
                 ray_dirs_wp,
+                min_dist,
                 max_dist,
             ],
-            outputs=[wp.from_torch(hit_distances, dtype=wp.float32),],
+            outputs=[
+                wp.from_torch(hit_distances, dtype=wp.float32),
+            ],
             device=self.device,
         )
         hit_distances = hit_distances.min(dim=1).values
         hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
         return hit_positions, hit_distances
-    
+
     @classmethod
-    def from_prim_paths(cls, paths: list[str], stage: Usd.Stage, device: str, simplify_factor: float=0.0):
+    def from_prim_paths(
+        cls,
+        paths: list[str],
+        stage: Usd.Stage,
+        device: str,
+        simplify_factor: float = 0.0,
+    ):
         """
         Args:
             paths: List of prim paths (can be regex) to find, e.g. ["World/.*/visuals"].
             stage: The USD stage to search in.
             device: The device to use for the raycaster.
-            simplify_factor: The factor to simplify the meshes. 0.0 means no simplification. 
+            simplify_factor: The factor to simplify the meshes. 0.0 means no simplification.
                 If a single float is provided, it will be used for all meshes.
         """
         if isinstance(simplify_factor, float):
             simplify_factor = [simplify_factor] * len(paths)
         if not len(paths) == len(simplify_factor):
-            raise ValueError("`simplify_factor` must be a single float or a list of floats with the same length as `paths`")
-        
+            raise ValueError(
+                "`simplify_factor` must be a single float or a list of floats with the same length as `paths`"
+            )
+
         meshes_wp = []
 
         n_faces_before = 0
@@ -127,7 +148,7 @@ class MultiMeshRaycaster:
         for path, factor in zip(paths, simplify_factor):
             if not (prims := find_matching_prims(path, stage)):
                 raise ValueError(f"No prims found for path {path}")
-            
+
             for prim in prims:
                 mesh_prims = get_mesh_prims_subtree(prim)
                 meshes_trimesh = []
@@ -138,12 +159,13 @@ class MultiMeshRaycaster:
                         mesh = mesh.simplify_quadric_decimation(factor)
                     n_faces_after += mesh.faces.shape[0]
                     meshes_trimesh.append(mesh)
-                mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(meshes_trimesh)
+                mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(
+                    meshes_trimesh
+                )
                 mesh_combined.merge_vertices()
                 meshes_wp.append(trimesh2wp(mesh_combined, device))
-        
+
         if n_faces_before != n_faces_after:
             print(f"Simplified {n_faces_before} to {n_faces_after} faces")
-        
-        return cls(meshes_wp, device)
 
+        return cls(meshes_wp, device)
