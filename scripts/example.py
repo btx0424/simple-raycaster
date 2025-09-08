@@ -7,7 +7,7 @@ import argparse
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from simple_raycaster.raycaster import MultiMeshRaycaster
-from simple_raycaster.utils import get_mesh_prims_subtree, usd2trimesh
+from simple_raycaster.utils_usd import get_mesh_prims_subtree, usd2trimesh
 
 
 if __name__ == "__main__":

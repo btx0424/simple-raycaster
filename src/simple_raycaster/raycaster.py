@@ -2,17 +2,9 @@ import numpy as np
 import torch
 import trimesh
 import warp as wp
+import mujoco
 
-from pxr import Usd
-
-from .utils import (
-    find_matching_prims,
-    get_mesh_prims_subtree,
-    quat_rotate_inverse,
-    trimesh2wp,
-    usd2trimesh,
-)
-
+from .helpers import quat_rotate_inverse, trimesh2wp
 
 @wp.kernel
 def multi_mesh_raycast_kernel(
@@ -83,6 +75,19 @@ class MultiMeshRaycaster:
         min_dist: float = 0.0,
         max_dist: float = 100.0,
     ):
+        """
+        Args:
+            mesh_pos_w: The position of the meshes in the world frame. Shape [N, n_meshes, 3].
+            mesh_quat_w: The orientation of the meshes in the world frame. Shape [N, n_meshes, 4].
+            ray_starts_w: The starting points of the rays in the world frame. Shape [N, n_rays, 3].
+            ray_dirs_w: The directions of the rays in the world frame. Shape [N, n_rays, 3].
+            min_dist: The minimum distance to the mesh. Defaults to 0.0.
+            max_dist: The maximum distance to the mesh. Defaults to 100.0.
+
+        Returns:
+            hit_positions: The positions of the hits in the world frame. Shape [N, n_meshes, n_rays, 3].
+            hit_distances: The distances to the hits. Shape [N, n_meshes, n_rays].
+        """
         n_rays = ray_dirs_w.shape[1]
         N = mesh_pos_w.shape[0]
         mesh_pos_w = mesh_pos_w.reshape(N, self.n_meshes, 1, 3)  # [N, n_meshes, 1, 3]
@@ -122,7 +127,7 @@ class MultiMeshRaycaster:
     def from_prim_paths(
         cls,
         paths: list[str],
-        stage: Usd.Stage,
+        stage: "Usd.Stage",
         device: str,
         simplify_factor: float = 0.0,
     ):
@@ -140,6 +145,8 @@ class MultiMeshRaycaster:
             raise ValueError(
                 "`simplify_factor` must be a single float or a list of floats with the same length as `paths`"
             )
+        
+        from .utils_usd import find_matching_prims, get_trimesh_from_prim
 
         meshes_wp = []
 
@@ -150,22 +157,70 @@ class MultiMeshRaycaster:
                 raise ValueError(f"No prims found for path {path}")
 
             for prim in prims:
-                mesh_prims = get_mesh_prims_subtree(prim)
-                meshes_trimesh = []
-                for mesh_prim in mesh_prims:
-                    mesh = usd2trimesh(mesh_prim)
-                    n_faces_before += mesh.faces.shape[0]
-                    if factor > 0.0:
-                        mesh = mesh.simplify_quadric_decimation(factor)
-                    n_faces_after += mesh.faces.shape[0]
-                    meshes_trimesh.append(mesh)
-                mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(
-                    meshes_trimesh
-                )
-                mesh_combined.merge_vertices()
+                # mesh_prims = get_mesh_prims_subtree(prim)
+                # meshes_trimesh = []
+                # for mesh_prim in mesh_prims:
+                #     mesh = usd2trimesh(mesh_prim)
+                #     n_faces_before += mesh.faces.shape[0]
+                #     if factor > 0.0:
+                #         mesh = mesh.simplify_quadric_decimation(factor)
+                #     n_faces_after += mesh.faces.shape[0]
+                #     meshes_trimesh.append(mesh)
+                # mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(
+                #     meshes_trimesh
+                # )
+                # mesh_combined.merge_vertices()
+                mesh_combined = get_trimesh_from_prim(prim)
+                
+                n_faces_before += mesh_combined.faces.shape[0]
+                if factor > 0.0:
+                    mesh_combined = mesh_combined.simplify_quadric_decimation(factor)
+                n_faces_after += mesh_combined.faces.shape[0]
+
                 meshes_wp.append(trimesh2wp(mesh_combined, device))
 
         if n_faces_before != n_faces_after:
             print(f"Simplified {n_faces_before} to {n_faces_after} faces")
 
         return cls(meshes_wp, device)
+    
+
+    @classmethod
+    def from_MjModel(
+        cls,
+        model: mujoco.MjModel,
+        device: str,
+        simplify_factor: float = 0.0,
+    ):
+        """
+        Args:
+            model: The Mujoco model to use for the raycaster.
+            device: The device to use for the raycaster.
+            simplify_factor: The factor to simplify the meshes. 0.0 means no simplification.
+                If a single float is provided, it will be used for all meshes.
+        """
+        from .utils_mjc import get_trimesh_from_body
+        
+        mesh_names = []
+        meshes_wp = []
+
+        n_faces_before = 0
+        n_faces_after = 0
+
+        for i in range(model.nbody):
+            body = model.body(i)
+            if body.geomnum.item() > 0:
+                mesh = get_trimesh_from_body(body, model)
+                n_faces_before += mesh.faces.shape[0]
+                if simplify_factor > 0.0:
+                    mesh = mesh.simplify_quadric_decimation(simplify_factor)
+                n_faces_after += mesh.faces.shape[0]
+
+                mesh_names.append(body.name)
+                meshes_wp.append(trimesh2wp(mesh, device))
+
+        if n_faces_before != n_faces_after:
+            print(f"Simplified {n_faces_before} to {n_faces_after} faces")
+
+        return cls(meshes_wp, device)
+

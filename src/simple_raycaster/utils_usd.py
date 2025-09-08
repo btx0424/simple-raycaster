@@ -1,25 +1,20 @@
-import torch
 import trimesh
 import numpy as np
 import warp as wp
 import re
 
-from pxr import Usd, UsdGeom, UsdPhysics
+from pxr import Usd, UsdGeom
 
 
-def quat_rotate_inverse(quat: torch.Tensor, vec: torch.Tensor):
-    """Apply an inverse quaternion rotation to a vector.
-
-    Args:
-        quat: The quaternion in (w, x, y, z). Shape is (..., 4).
-        vec: The vector in (x, y, z). Shape is (..., 3).
-
-    Returns:
-        The rotated vector in (x, y, z). Shape is (..., 3).
-    """
-    xyz = quat[..., 1:]
-    t = xyz.cross(vec, dim=-1) * 2
-    return (vec - quat[..., 0:1] * t + xyz.cross(t, dim=-1))
+def get_trimesh_from_prim(prim: Usd.Prim):
+    mesh_prims = get_mesh_prims_subtree(prim)
+    trimesh_list = []
+    for mesh_prim in mesh_prims:
+        mesh = usd2trimesh(mesh_prim)
+        trimesh_list.append(mesh)
+    trimesh_combined: trimesh.Trimesh = trimesh.util.concatenate(trimesh_list)
+    trimesh_combined.merge_vertices()
+    return trimesh_combined
 
 
 def get_mesh_prims_subtree(prim: Usd.Prim):
@@ -74,16 +69,6 @@ def usd2wp(prim: Usd.Prim, device):
     return wp.Mesh(
         points=wp.array(vertices.astype(np.float32), dtype=wp.vec3, device=device),
         indices=wp.array(faces.astype(np.int32).flatten(), dtype=wp.int32, device=device),
-    )
-
-
-def trimesh2wp(mesh: trimesh.Trimesh, device):
-    """
-    Convert a trimesh.Trimesh object to a wp.Mesh object.
-    """
-    return wp.Mesh(
-        points=wp.array(mesh.vertices.astype(np.float32), dtype=wp.vec3, device=device),
-        indices=wp.array(mesh.faces.astype(np.int32).flatten(), dtype=wp.int32, device=device),
     )
 
 
