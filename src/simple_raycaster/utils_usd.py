@@ -9,8 +9,26 @@ from pxr import Usd, UsdGeom
 def get_trimesh_from_prim(prim: Usd.Prim):
     mesh_prims = get_mesh_prims_subtree(prim)
     trimesh_list = []
+    time = Usd.TimeCode.Default()
+    parent_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    
+    # print(prim, parent_transform.ExtractTranslation(), parent_transform.ExtractRotationQuat())
     for mesh_prim in mesh_prims:
         mesh = usd2trimesh(mesh_prim)
+        transform = UsdGeom.Xformable(mesh_prim).ComputeLocalToWorldTransform(time)
+        if mesh_prim.IsInPrototype():
+            pass # no global transform for prototype meshes
+        else:
+            transform = transform * parent_transform.GetInverse()
+
+        translation = np.array(transform.ExtractTranslation())
+        orientation = transform.ExtractRotationQuat()
+        orientation = np.array([orientation.GetReal(), *orientation.GetImaginary()])
+        transform = trimesh.transformations.concatenate_matrices(
+            trimesh.transformations.translation_matrix(translation),
+            trimesh.transformations.quaternion_matrix(orientation),
+        )
+        mesh.apply_transform(transform)
         trimesh_list.append(mesh)
     trimesh_combined: trimesh.Trimesh = trimesh.util.concatenate(trimesh_list)
     trimesh_combined.merge_vertices()
@@ -33,7 +51,7 @@ def get_mesh_prims_subtree(prim: Usd.Prim):
     return mesh_prims
 
 
-def usd2trimesh(prim: Usd.Prim, apply_transform: bool=True):
+def usd2trimesh(prim: Usd.Prim):
     """
     Convert a USD prim to a trimesh.Trimesh object.
 
@@ -45,17 +63,6 @@ def usd2trimesh(prim: Usd.Prim, apply_transform: bool=True):
     vertices = np.asarray(mesh.GetPointsAttr().Get())
     faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
     mesh = trimesh.Trimesh(vertices, faces.reshape(-1, 3))
-    if apply_transform:
-        xform = UsdGeom.Xformable(prim)
-        transform = xform.GetLocalTransformation(Usd.TimeCode.Default())
-        translation = np.array(transform.ExtractTranslation())
-        orientation = transform.ExtractRotationQuat()
-        orientation = np.array([orientation.GetReal(), *orientation.GetImaginary()])
-        transform = trimesh.transformations.concatenate_matrices(
-            trimesh.transformations.translation_matrix(translation),
-            trimesh.transformations.quaternion_matrix(orientation),
-        )
-        mesh.apply_transform(transform)
     return mesh
 
 

@@ -9,7 +9,6 @@ def get_trimesh_from_body(body, model: mujoco.MjModel):
     meshes = {}
     for j in range(geomadr, geomadr + geomnum):
         geom = model.geom(j)
-        print(geom.name)
         is_mesh = geom.type.item() == mujoco.mjtGeom.mjGEOM_MESH
         if is_mesh:
             meshes[geom.dataid.item()] = (geom.pos, geom.quat)

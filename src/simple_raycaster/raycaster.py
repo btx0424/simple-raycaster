@@ -41,15 +41,15 @@ class MultiMeshRaycaster:
 
     def __init__(self, meshes: list[wp.Mesh], device: str):
         self.meshes = meshes
-        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], dtype=wp.uint64)
         self.device = device
+        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], device=device, dtype=wp.uint64)
         self.mesh_names = None
     
     def add_mesh(self, mesh):
         if isinstance(mesh, trimesh.Trimesh):
             mesh = trimesh2wp(mesh, self.device)
         self.meshes.append(mesh)
-        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], dtype=wp.uint64)
+        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], device=self.device, dtype=wp.uint64)
 
     @property
     def n_points(self):
@@ -104,7 +104,7 @@ class MultiMeshRaycaster:
         hit_distances = torch.empty(
             N, self.n_meshes, n_rays, device=ray_starts_w.device
         )
-        launch: wp.Launch = wp.launch(
+        wp.launch(
             multi_mesh_raycast_kernel,
             dim=(N, self.n_meshes, n_rays),
             inputs=[
@@ -149,7 +149,8 @@ class MultiMeshRaycaster:
         from .utils_usd import find_matching_prims, get_trimesh_from_prim
 
         meshes_wp = []
-
+        n_verts_before = 0
+        n_verts_after = 0
         n_faces_before = 0
         n_faces_after = 0
         for path, factor in zip(paths, simplify_factor):
@@ -157,30 +158,19 @@ class MultiMeshRaycaster:
                 raise ValueError(f"No prims found for path {path}")
 
             for prim in prims:
-                # mesh_prims = get_mesh_prims_subtree(prim)
-                # meshes_trimesh = []
-                # for mesh_prim in mesh_prims:
-                #     mesh = usd2trimesh(mesh_prim)
-                #     n_faces_before += mesh.faces.shape[0]
-                #     if factor > 0.0:
-                #         mesh = mesh.simplify_quadric_decimation(factor)
-                #     n_faces_after += mesh.faces.shape[0]
-                #     meshes_trimesh.append(mesh)
-                # mesh_combined: trimesh.Trimesh = trimesh.util.concatenate(
-                #     meshes_trimesh
-                # )
-                # mesh_combined.merge_vertices()
                 mesh_combined = get_trimesh_from_prim(prim)
                 
+                n_verts_before += mesh_combined.vertices.shape[0]
                 n_faces_before += mesh_combined.faces.shape[0]
                 if factor > 0.0:
                     mesh_combined = mesh_combined.simplify_quadric_decimation(factor)
+                n_verts_after += mesh_combined.vertices.shape[0]
                 n_faces_after += mesh_combined.faces.shape[0]
 
                 meshes_wp.append(trimesh2wp(mesh_combined, device))
 
         if n_faces_before != n_faces_after:
-            print(f"Simplified {n_faces_before} to {n_faces_after} faces")
+            print(f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})")
 
         return cls(meshes_wp, device)
     
@@ -188,6 +178,7 @@ class MultiMeshRaycaster:
     @classmethod
     def from_MjModel(
         cls,
+        body_names: list[str],
         model: mujoco.MjModel,
         device: str,
         simplify_factor: float = 0.0,
@@ -204,23 +195,27 @@ class MultiMeshRaycaster:
         mesh_names = []
         meshes_wp = []
 
+        n_verts_before = 0
+        n_verts_after = 0
         n_faces_before = 0
         n_faces_after = 0
 
-        for i in range(model.nbody):
-            body = model.body(i)
+        for body_name in body_names:
+            body = model.body(body_name)
             if body.geomnum.item() > 0:
                 mesh = get_trimesh_from_body(body, model)
+                n_verts_before += mesh.vertices.shape[0]
                 n_faces_before += mesh.faces.shape[0]
                 if simplify_factor > 0.0:
                     mesh = mesh.simplify_quadric_decimation(simplify_factor)
+                n_verts_after += mesh.vertices.shape[0]
                 n_faces_after += mesh.faces.shape[0]
 
                 mesh_names.append(body.name)
                 meshes_wp.append(trimesh2wp(mesh, device))
 
         if n_faces_before != n_faces_after:
-            print(f"Simplified {n_faces_before} to {n_faces_after} faces")
+            print(f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})")
 
         return cls(meshes_wp, device)
 
