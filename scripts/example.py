@@ -5,6 +5,7 @@ import warp as wp
 import argparse
 import mujoco
 import time
+from tqdm import tqdm
 
 from simple_raycaster.raycaster import MultiMeshRaycaster
 
@@ -13,6 +14,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--usd", type=str)
     parser.add_argument("--mjcf", type=str)
+    parser.add_argument("--benchmark", action="store_true")
     args = parser.parse_args()
 
     if args.usd is None and args.mjcf is None:
@@ -114,20 +116,30 @@ if __name__ == "__main__":
     quats = torch.from_numpy(np.stack(quats, axis=0)).float().to(device)
     print(translations.shape, quats.shape)
 
-    N = 4096
-    T = 100
+    if args.benchmark:
+        N = 4096
+        T = 1000
+    else:
+        N = 1
+        T = 1
+
     start_time = time.perf_counter()
-    for i in range(T):
-        hit_positions, hit_distances = raycaster.raycast(
+
+    # raycast_func = raycaster.raycast
+    raycast_func = raycaster.raycast_fused
+
+    for i in tqdm(range(T)):
+        hit_positions, hit_distances = raycast_func(
             translations.expand(N, *translations.shape),
             quats.expand(N, *quats.shape),
             ray_starts.expand(N, *ray_starts.shape),
             ray_dirs.expand(N, *ray_dirs.shape),
+            enabled=torch.ones(N, dtype=torch.bool, device=device),
             min_dist=0.0,
             max_dist=5.0,
         )
     end_time = time.perf_counter()
-    print(f"Average time: {(end_time - start_time) / T} s")
+    print(f"Total time: {end_time - start_time} s, Average time: {(end_time - start_time) / T} s")
     hit_positions = hit_positions[0]
 
     scene = trimesh.Scene([mesh for mesh in trimesh_list])

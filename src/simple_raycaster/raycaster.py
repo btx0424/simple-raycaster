@@ -6,16 +6,20 @@ import mujoco
 
 from .helpers import quat_rotate_inverse, trimesh2wp
 
-@wp.kernel
-def multi_mesh_raycast_kernel(
+@wp.kernel(enable_backward=False)
+def raycast_kernel(
     meshes: wp.array(dtype=wp.uint64),
     ray_starts: wp.array(dtype=wp.vec3, ndim=3),
     ray_dirs: wp.array(dtype=wp.vec3, ndim=3),
+    enabled: wp.array(dtype=wp.bool, ndim=1),
     min_dist: float,
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=3),
 ):
     i, mesh_id, ray_id = wp.tid()
+    if not enabled[i]:
+        hit_distances[i, mesh_id, ray_id] = wp.INF
+        return
     mesh = meshes[mesh_id]
     ray_start = ray_starts[i, mesh_id, ray_id]
     ray_dir = ray_dirs[i, mesh_id, ray_id]
@@ -23,6 +27,45 @@ def multi_mesh_raycast_kernel(
         mesh,
         ray_start,
         ray_dir,
+        max_dist,
+    )
+    t = max_dist
+    if result.result and result.t >= min_dist:
+        t = result.t
+    hit_distances[i, mesh_id, ray_id] = t
+
+
+@wp.kernel(enable_backward=False)
+def transform_and_raycast_kernel(
+    meshes: wp.array(dtype=wp.uint64),
+    mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    mesh_quat_w: wp.array(dtype=wp.quat, ndim=2),
+    ray_starts_w: wp.array(dtype=wp.vec3, ndim=2),
+    ray_dirs_w: wp.array(dtype=wp.vec3, ndim=2),
+    enabled: wp.array(dtype=wp.bool, ndim=1),
+    min_dist: float,
+    max_dist: float,
+    hit_distances: wp.array(dtype=wp.float32, ndim=3),
+):
+    i, mesh_id, ray_id = wp.tid()
+    if not enabled[i]:
+        hit_distances[i, mesh_id, ray_id] = wp.INF
+        return
+    
+    # transform ray starts and dirs to mesh frame
+    ray_start_b = wp.quat_rotate_inv(
+        mesh_quat_w[i, mesh_id],
+        ray_starts_w[i, ray_id] - mesh_pos_w[i, mesh_id],
+    )
+    ray_dir_b = wp.quat_rotate_inv(
+        mesh_quat_w[i, mesh_id],
+        ray_dirs_w[i, ray_id],
+    )
+    
+    result = wp.mesh_query_ray(
+        meshes[mesh_id],
+        ray_start_b,
+        ray_dir_b,
         max_dist,
     )
     t = max_dist
@@ -72,6 +115,7 @@ class MultiMeshRaycaster:
         mesh_quat_w: torch.Tensor,  # [N, n_meshes, 4]
         ray_starts_w: torch.Tensor,  # [N, n_rays, 3]
         ray_dirs_w: torch.Tensor,  # [N, n_rays, 3]
+        enabled: torch.Tensor=None,  # [N]
         min_dist: float = 0.0,
         max_dist: float = 100.0,
     ):
@@ -81,6 +125,7 @@ class MultiMeshRaycaster:
             mesh_quat_w: The orientation of the meshes in the world frame. Shape [N, n_meshes, 4].
             ray_starts_w: The starting points of the rays in the world frame. Shape [N, n_rays, 3].
             ray_dirs_w: The directions of the rays in the world frame. Shape [N, n_rays, 3].
+
             min_dist: The minimum distance to the mesh. Defaults to 0.0.
             max_dist: The maximum distance to the mesh. Defaults to 100.0.
 
@@ -90,27 +135,33 @@ class MultiMeshRaycaster:
         """
         n_rays = ray_dirs_w.shape[1]
         N = mesh_pos_w.shape[0]
+        result_shape = (N, self.n_meshes, n_rays)
+
         mesh_pos_w = mesh_pos_w.reshape(N, self.n_meshes, 1, 3)  # [N, n_meshes, 1, 3]
         mesh_quat_w = mesh_quat_w.reshape(N, self.n_meshes, 1, 4)  # [N, n_meshes, 1, 4]
-        _ray_starts_w = ray_starts_w.reshape(N, 1, n_rays, 3)  # [N, 1, n_rays, 3]
-        _ray_dirs_w = ray_dirs_w.reshape(N, 1, n_rays, 3)  # [N, 1, n_rays, 3]
+
+        if enabled is None:
+            enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
+        else:
+            enabled = enabled.reshape(N,)
 
         # convert to mesh frame
-        ray_starts_b = quat_rotate_inverse(mesh_quat_w, _ray_starts_w - mesh_pos_w)
-        ray_dirs_b = quat_rotate_inverse(mesh_quat_w, _ray_dirs_w)
+        ray_starts_b = quat_rotate_inverse(mesh_quat_w, ray_starts_w.unsqueeze(1) - mesh_pos_w)
+        ray_dirs_b = quat_rotate_inverse(mesh_quat_w, ray_dirs_w.unsqueeze(1))
 
         ray_starts_wp = wp.from_torch(ray_starts_b, dtype=wp.vec3, return_ctype=True)
         ray_dirs_wp = wp.from_torch(ray_dirs_b, dtype=wp.vec3, return_ctype=True)
-        hit_distances = torch.empty(
-            N, self.n_meshes, n_rays, device=ray_starts_w.device
-        )
+        enabled_wp = wp.from_torch(enabled, dtype=wp.bool, return_ctype=True)
+
+        hit_distances = torch.empty(result_shape, device=ray_starts_w.device)
         wp.launch(
-            multi_mesh_raycast_kernel,
+            raycast_kernel,
             dim=(N, self.n_meshes, n_rays),
             inputs=[
                 self.meshes_array,
                 ray_starts_wp,
                 ray_dirs_wp,
+                enabled_wp,
                 min_dist,
                 max_dist,
             ],
@@ -118,7 +169,67 @@ class MultiMeshRaycaster:
                 wp.from_torch(hit_distances, dtype=wp.float32),
             ],
             device=self.device,
+            record_tape=False,
         )
+        
+        hit_distances = hit_distances.min(dim=1).values
+        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+        return hit_positions, hit_distances
+    
+    def raycast_fused(
+        self,
+        mesh_pos_w: torch.Tensor,  # [N, n_meshes, 3]
+        mesh_quat_w: torch.Tensor,  # [N, n_meshes, 4]
+        ray_starts_w: torch.Tensor,  # [N, n_rays, 3]
+        ray_dirs_w: torch.Tensor,  # [N, n_rays, 3]
+        enabled: torch.Tensor=None,  # [N]
+        min_dist: float = 0.0,
+        max_dist: float = 100.0,
+    ):
+        """
+        Args:
+            mesh_pos_w: The position of the meshes in the world frame. Shape [N, n_meshes, 3].
+            mesh_quat_w: The orientation of the meshes in the world frame. Shape [N, n_meshes, 4].
+            ray_starts_w: The starting points of the rays in the world frame. Shape [N, n_rays, 3].
+            ray_dirs_w: The directions of the rays in the world frame. Shape [N, n_rays, 3].
+            enabled: The enabled flag for the rays. Shape [N].
+            min_dist: The minimum distance to the mesh. Defaults to 0.0.
+            max_dist: The maximum distance to the mesh. Defaults to 100.0.
+
+        Returns:
+            hit_positions: The positions of the hits in the world frame. Shape [N, n_meshes, n_rays, 3].
+            hit_distances: The distances to the hits. Shape [N, n_meshes, n_rays].
+        """
+        n_rays = ray_dirs_w.shape[1]
+        N = mesh_pos_w.shape[0]
+        result_shape = (N, self.n_meshes, n_rays)
+
+        if enabled is None:
+            enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
+        else:
+            enabled = enabled.reshape(N,)
+
+        hit_distances = torch.empty(result_shape, device=ray_starts_w.device)
+        wp.launch(
+            transform_and_raycast_kernel,
+            dim=(N, self.n_meshes, n_rays),
+            inputs=[
+                self.meshes_array,
+                wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(mesh_quat_w, dtype=wp.quat, return_ctype=True),
+                wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                min_dist,
+                max_dist,
+            ],
+            outputs=[
+                wp.from_torch(hit_distances, dtype=wp.float32),
+            ],
+            device=self.device,
+            record_tape=False,
+        )
+        
         hit_distances = hit_distances.min(dim=1).values
         hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
         return hit_positions, hit_distances
