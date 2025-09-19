@@ -39,7 +39,7 @@ def raycast_kernel(
 def transform_and_raycast_kernel(
     meshes: wp.array(dtype=wp.uint64),
     mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
-    mesh_quat_w: wp.array(dtype=wp.quat, ndim=2),
+    mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),
     ray_starts_w: wp.array(dtype=wp.vec3, ndim=2),
     ray_dirs_w: wp.array(dtype=wp.vec3, ndim=2),
     enabled: wp.array(dtype=wp.bool, ndim=1),
@@ -53,12 +53,14 @@ def transform_and_raycast_kernel(
         return
     
     # transform ray starts and dirs to mesh frame
+    quat_wxyz = mesh_quat_w[i, mesh_id]
+    quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
     ray_start_b = wp.quat_rotate_inv(
-        mesh_quat_w[i, mesh_id],
+        quat_xyzw,
         ray_starts_w[i, ray_id] - mesh_pos_w[i, mesh_id],
     )
     ray_dir_b = wp.quat_rotate_inv(
-        mesh_quat_w[i, mesh_id],
+        quat_xyzw,
         ray_dirs_w[i, ray_id],
     )
     
@@ -130,8 +132,8 @@ class MultiMeshRaycaster:
             max_dist: The maximum distance to the mesh. Defaults to 100.0.
 
         Returns:
-            hit_positions: The positions of the hits in the world frame. Shape [N, n_meshes, n_rays, 3].
-            hit_distances: The distances to the hits. Shape [N, n_meshes, n_rays].
+            hit_positions: The positions of the hits in the world frame. Shape [N, n_rays, 3].
+            hit_distances: The distances to the hits. Shape [N, n_rays].
         """
         n_rays = ray_dirs_w.shape[1]
         N = mesh_pos_w.shape[0]
@@ -172,8 +174,8 @@ class MultiMeshRaycaster:
             record_tape=False,
         )
         
-        hit_distances = hit_distances.min(dim=1).values
-        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+        hit_distances = hit_distances.min(dim=1).values # [N, n_rays]
+        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w # [N, n_rays, 3]
         return hit_positions, hit_distances
     
     def raycast_fused(
@@ -197,8 +199,8 @@ class MultiMeshRaycaster:
             max_dist: The maximum distance to the mesh. Defaults to 100.0.
 
         Returns:
-            hit_positions: The positions of the hits in the world frame. Shape [N, n_meshes, n_rays, 3].
-            hit_distances: The distances to the hits. Shape [N, n_meshes, n_rays].
+            hit_positions: The positions of the hits in the world frame. Shape [N, n_rays, 3].
+            hit_distances: The distances to the hits. Shape [N, n_rays].
         """
         n_rays = ray_dirs_w.shape[1]
         N = mesh_pos_w.shape[0]
@@ -216,7 +218,7 @@ class MultiMeshRaycaster:
             inputs=[
                 self.meshes_array,
                 wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
-                wp.from_torch(mesh_quat_w, dtype=wp.quat, return_ctype=True),
+                wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
                 wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
                 wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
                 wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
@@ -230,8 +232,8 @@ class MultiMeshRaycaster:
             record_tape=False,
         )
         
-        hit_distances = hit_distances.min(dim=1).values
-        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+        hit_distances = hit_distances.min(dim=1).values # [N, n_rays]
+        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w # [N, n_rays, 3]
         return hit_positions, hit_distances
 
     @classmethod

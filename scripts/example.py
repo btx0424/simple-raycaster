@@ -8,6 +8,7 @@ import time
 from tqdm import tqdm
 
 from simple_raycaster.raycaster import MultiMeshRaycaster
+from simple_raycaster.helpers import voxelize_torch, voxelize_wp
 
 
 if __name__ == "__main__":
@@ -95,8 +96,8 @@ if __name__ == "__main__":
 
     print(raycaster)
 
-    horizontal_angles = torch.linspace(-torch.pi / 4, torch.pi / 4, 20)
-    vertical_angles = torch.linspace(-torch.pi / 6, torch.pi / 6, 10)
+    horizontal_angles = torch.linspace(-torch.pi / 4, torch.pi / 4, 32)
+    vertical_angles = torch.linspace(-torch.pi / 6, torch.pi / 6, 32)
     hh, vv = torch.meshgrid(horizontal_angles, vertical_angles)
 
     ray_dirs = torch.stack([
@@ -118,7 +119,7 @@ if __name__ == "__main__":
 
     if args.benchmark:
         N = 4096
-        T = 1000
+        T = 500
     else:
         N = 1
         T = 1
@@ -126,8 +127,11 @@ if __name__ == "__main__":
     start_time = time.perf_counter()
 
     # raycast_func = raycaster.raycast
-    raycast_func = raycaster.raycast_fused
+    # voxelize_func = voxelize_torch
 
+    raycast_func = raycaster.raycast_fused
+    voxelize_func = voxelize_wp
+    
     for i in tqdm(range(T)):
         hit_positions, hit_distances = raycast_func(
             translations.expand(N, *translations.shape),
@@ -138,15 +142,41 @@ if __name__ == "__main__":
             min_dist=0.0,
             max_dist=5.0,
         )
+        voxel_grid = voxelize_func(
+            voxel_shape=(32, 32, 32),
+            resolution=(0.05, 0.05, 0.05),
+            hit_positions_b=hit_positions.reshape(N, -1, 3),
+        )
+    
     end_time = time.perf_counter()
     print(f"Total time: {end_time - start_time} s, Average time: {(end_time - start_time) / T} s")
-    hit_positions = hit_positions[0]
+    
+    if not args.benchmark: # visualize results
+        
+        voxel_grid = voxel_grid[0]
+        hit_positions = hit_positions[0]
 
-    scene = trimesh.Scene([mesh for mesh in trimesh_list])
-    segments = torch.stack([ray_starts, hit_positions], dim=1).cpu().numpy()
-    lines = trimesh.load_path(segments)
-    frame = trimesh.creation.axis()
-    scene.add_geometry(lines)
-    scene.add_geometry(frame)
-    scene.show()
+        scene = trimesh.Scene([mesh for mesh in trimesh_list])
+        # Get the indices of occupied voxels
+        occupied = voxel_grid.nonzero(as_tuple=False).cpu().numpy()  # shape: [num_voxels, 3]
+        resolution = np.array([0.05, 0.05, 0.05])  # should match the resolution used above
+
+        # Center the voxel grid at the origin
+        offset = np.array(voxel_grid.shape) / 2 * resolution
+
+        # Add each occupied voxel as a small box to the scene
+        for idx in occupied:
+            center = idx * resolution - offset + resolution / 2
+            box = trimesh.creation.box(extents=[resolution[0], resolution[1], resolution[2]], transform=trimesh.transformations.translation_matrix(center))
+            # Make the voxels semi-transparent and colored
+            box.visual.face_colors = [0, 255, 0, 80]
+            scene.add_geometry(box)
+        
+        # segments = torch.stack([ray_starts, hit_positions], dim=1).cpu().numpy()
+        # lines = trimesh.load_path(segments)
+        # scene.add_geometry(lines)
+
+        frame = trimesh.creation.axis()
+        scene.add_geometry(frame)
+        scene.show()
 
