@@ -2,12 +2,12 @@ import trimesh
 import numpy as np
 import warp as wp
 import re
+from typing import Callable
 
 from pxr import Usd, UsdGeom
 
-
-def get_trimesh_from_prim(prim: Usd.Prim):
-    mesh_prims = get_mesh_prims_subtree(prim)
+def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] = lambda _: True):
+    mesh_prims = get_mesh_prims_subtree(prim, predicate)
     trimesh_list = []
     time = Usd.TimeCode.Default()
     parent_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
@@ -35,7 +35,7 @@ def get_trimesh_from_prim(prim: Usd.Prim):
     return trimesh_combined
 
 
-def get_mesh_prims_subtree(prim: Usd.Prim):
+def get_mesh_prims_subtree(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] = lambda _: True):
     """
     Recursively get all mesh primitives from a USD prim.
     """
@@ -45,7 +45,7 @@ def get_mesh_prims_subtree(prim: Usd.Prim):
     all_prims = [prim]
     while len(all_prims) > 0:
         child_prim = all_prims.pop(0)
-        if child_prim.GetTypeName() == "Mesh":
+        if child_prim.GetTypeName() == "Mesh" and predicate(child_prim):
             mesh_prims.append(child_prim)
         all_prims += child_prim.GetChildren()
     return mesh_prims
