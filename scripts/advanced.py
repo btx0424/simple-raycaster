@@ -29,14 +29,16 @@ import trimesh
 import numpy as np
 import torch
 import random
+import warp as wp
 from tqdm import tqdm
 
 from simple_raycaster.raycaster import MultiMeshRaycaster
 
-if __name__ == "__main__":
+
+def main():
     N, M = 64, 64
     spacing = 4.0
-    N_rays = 100
+    N_rays = 32 * 32
 
     random_shapes = []
     translations = []
@@ -44,7 +46,7 @@ if __name__ == "__main__":
     origin_y = -0.5 * (M - 1) * spacing
     for i, j in tqdm(list(np.ndindex(N, M)), desc="Generating shapes"):
         shapes = []
-        shape_A = trimesh.creation.box(extents=torch.rand(3) * 2.0 + torch.tensor([1.0, 1.0, 0.05]))
+        shape_A = trimesh.creation.box(extents=torch.rand(3) + torch.tensor([1.0, 1.0, 0.05]))
         shapes.append(shape_A)
         shape_B = trimesh.creation.box(extents=torch.rand(3) + torch.tensor([1.0, 1.0, 0.05]))
         shape_B.apply_translation(torch.randn(3).clamp(-3, 3) * 0.2)
@@ -182,6 +184,7 @@ if __name__ == "__main__":
         start_event.record()
         for _ in range(num_iterations):
             hit_positions, hit_distances = method(**kwargs)
+            wp.synchronize()
         end_event.record()
         torch.cuda.synchronize()
         
@@ -316,3 +319,8 @@ if __name__ == "__main__":
                 print(f"    Positions - Max diff: {(ref_pos - pos).abs().max().item():.6f}, Mean diff: {(ref_pos - pos).abs().mean().item():.6f}")
             if not dist_match:
                 print(f"    Distances - Max diff: {(ref_dist - dist).abs().max().item():.6f}, Mean diff: {(ref_dist - dist).abs().mean().item():.6f}")
+
+
+if __name__ == "__main__":
+    main()
+
