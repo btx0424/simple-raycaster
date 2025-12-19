@@ -8,6 +8,9 @@ from pxr import Usd, UsdGeom
 
 def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] = lambda _: True):
     mesh_prims = get_mesh_prims_subtree(prim, predicate)
+    if len(mesh_prims) == 0:
+        raise ValueError(f"No mesh primitives found in {prim.GetPath().pathString}")
+    
     trimesh_list = []
     time = Usd.TimeCode.Default()
     parent_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
