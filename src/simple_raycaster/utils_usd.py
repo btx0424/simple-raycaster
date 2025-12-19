@@ -21,13 +21,6 @@ def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] 
         else:
             transform = transform * parent_transform.GetInverse()
 
-        translation = np.array(transform.ExtractTranslation())
-        orientation = transform.ExtractRotationQuat()
-        orientation = np.array([orientation.GetReal(), *orientation.GetImaginary()])
-        transform = trimesh.transformations.concatenate_matrices(
-            trimesh.transformations.translation_matrix(translation),
-            trimesh.transformations.quaternion_matrix(orientation),
-        )
         mesh.apply_transform(transform)
         trimesh_list.append(mesh)
     trimesh_combined: trimesh.Trimesh = trimesh.util.concatenate(trimesh_list)
