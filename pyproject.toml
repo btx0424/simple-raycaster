@@ -14,6 +14,11 @@ dependencies = [
     "trimesh",
     "warp-lang",
     "fast_simplification",
+    "torch>=2.5.1",
+    "mujoco>=3.2.3",
+    "tqdm>=4.67.1",
+    "pyglet<2",
+    "scipy>=1.10.1",
 ]
 
 [project.urls]

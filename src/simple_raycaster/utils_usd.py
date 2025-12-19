@@ -21,7 +21,8 @@ def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] 
         else:
             transform = transform * parent_transform.GetInverse()
 
-        mesh.apply_transform(transform)
+        transform_np = np.array(transform).transpose()
+        mesh.apply_transform(transform_np)
         trimesh_list.append(mesh)
     trimesh_combined: trimesh.Trimesh = trimesh.util.concatenate(trimesh_list)
     trimesh_combined.merge_vertices()

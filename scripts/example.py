@@ -46,12 +46,9 @@ if __name__ == "__main__":
                     translation = np.array(transform.ExtractTranslation())
                     orientation = transform.ExtractRotationQuat()
                     orientation = np.array([orientation.GetReal(), *orientation.GetImaginary()])
-                    transform = trimesh.transformations.concatenate_matrices(
-                        trimesh.transformations.translation_matrix(translation),
-                        trimesh.transformations.quaternion_matrix(orientation),
-                    )
                     mesh = get_trimesh_from_prim(visuals_prim)
-                    mesh.apply_transform(transform)
+                    transform_np = np.array(transform).transpose()
+                    mesh.apply_transform(transform_np)
                     trimesh_list.append(mesh)
 
                     translations.append(translation)
