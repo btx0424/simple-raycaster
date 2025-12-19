@@ -43,11 +43,17 @@ if __name__ == "__main__":
     origin_x = -0.5 * (N - 1) * spacing
     origin_y = -0.5 * (M - 1) * spacing
     for i, j in tqdm(list(np.ndindex(N, M)), desc="Generating shapes"):
-        shape_A = trimesh.creation.box(extents=torch.rand(3) + torch.tensor([1.0, 1.0, 0.05]))
-        # shape_A.apply_translation(torch.randn(3).clamp(-3, 3) * 0.1)
-        shape_B = trimesh.creation.capsule(height=random.uniform(0.5, 1.0), radius=random.uniform(0.2, 0.5))
+        shapes = []
+        shape_A = trimesh.creation.box(extents=torch.rand(3) * 2.0 + torch.tensor([1.0, 1.0, 0.05]))
+        shapes.append(shape_A)
+        shape_B = trimesh.creation.box(extents=torch.rand(3) + torch.tensor([1.0, 1.0, 0.05]))
         shape_B.apply_translation(torch.randn(3).clamp(-3, 3) * 0.2)
-        shape = trimesh.util.concatenate([shape_A, shape_B])
+        shapes.append(shape_B)
+        shape_C = trimesh.creation.box(extents=torch.rand(3) + torch.tensor([1.0, 1.0, 0.05]))
+        shape_C.apply_translation(torch.randn(3).clamp(-3, 3) * 0.2)
+        shapes.append(shape_C)
+        shape: trimesh.Trimesh = trimesh.util.concatenate(shapes)
+
         translation = [origin_x + i * spacing, origin_y + j * spacing, 0.0]
         
         translations.append(translation)
@@ -61,32 +67,42 @@ if __name__ == "__main__":
         random_shapes,
         device="cuda",
     )
-    mesh_indices = torch.stack([
-        torch.arange(N * M, device="cuda"),
-        torch.full((N * M,), N * M, device="cuda"),
+    mesh_indices = torch.arange(N * M, device="cuda").reshape(N * M, 1)
+    mesh_indices = torch.cat([
+        mesh_indices,
+        torch.full((N * M, 1), N * M, device="cuda"),
     ], dim=1)
     
     for shape, translation in zip(random_shapes, translations):
         shape.apply_translation(translation)
 
+    shapes_combined = trimesh.util.concatenate(random_shapes)
     raycaster_combined = MultiMeshRaycaster(
-        [trimesh.util.concatenate(random_shapes)],
+        [shapes_combined],
         device="cuda",
     )
 
     if N * M <= 64:
-        shapes_combined = trimesh.util.concatenate(random_shapes)
         shapes_combined.show()
 
-    translations = torch.tensor(translations, device="cuda")
-    quaternions = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 4)
+    translations = torch.tensor(translations, device="cuda").reshape(N * M, 1, 3)
+    translations = torch.cat([
+        translations,
+        torch.zeros_like(translations), # for the shared shape
+    ], dim=1) # [N * M, 2, 3]
+    quaternions = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4).clone()
+    quaternions = torch.cat([
+        quaternions,
+        quaternions,
+    ], dim=1) # [N * M, 2, 4]
     
-    ray_starts = translations.unsqueeze(1).expand(N * M, N_rays, 3).clone()
+    ray_starts = translations[:, :1].expand(N * M, N_rays, 3).clone()
+    ray_starts[:, :, :2] += torch.randn_like(ray_starts[:, :, :2]) * 0.05
     ray_starts[:, :, 2].uniform_(1.0, 2.0)
     ray_dirs = torch.zeros(N * M, N_rays, 3, device="cuda")
 
     ray_dirs[:, :, 2] = -1.0
-    ray_dirs[:, :, :2].uniform_(-0.1, 0.1)
+    ray_dirs[:, :, :2].uniform_(-0.2, 0.2)
     ray_dirs = ray_dirs / ray_dirs.norm(dim=-1, keepdim=True)
     
     # Warmup runs
@@ -94,11 +110,11 @@ if __name__ == "__main__":
     for _ in range(10):
         # Fused versions
         _ = raycaster_independent.raycast_fused(
-            mesh_pos_w=translations.reshape(N * M, 1, 3),
-            mesh_quat_w=quaternions.reshape(N * M, 1, 4),
+            mesh_pos_w=translations,
+            mesh_quat_w=quaternions,
             ray_starts_w=ray_starts.clone(),
             ray_dirs_w=ray_dirs.clone(),
-            mesh_indices=torch.arange(N * M, device="cuda").reshape(N * M, 1),
+            mesh_indices=mesh_indices,
             min_dist=0.05,
             max_dist=10.0,
         )
@@ -112,11 +128,11 @@ if __name__ == "__main__":
         )
         # Non-fused versions
         _ = raycaster_independent.raycast(
-            mesh_pos_w=translations.reshape(N * M, 1, 3),
-            mesh_quat_w=quaternions.reshape(N * M, 1, 4),
+            mesh_pos_w=translations,
+            mesh_quat_w=quaternions,
             ray_starts_w=ray_starts.clone(),
             ray_dirs_w=ray_dirs.clone(),
-            mesh_indices=torch.arange(N * M, device="cuda").reshape(N * M, 1),
+            mesh_indices=mesh_indices,
             min_dist=0.05,
             max_dist=10.0,
         )
@@ -158,7 +174,7 @@ if __name__ == "__main__":
             "ray_starts_w": ray_starts.clone(),
             "ray_dirs_w": ray_dirs.clone(),
             "min_dist": 0.05,
-            "max_dist": 10.0,
+            "max_dist": 100.0,
         }
         if mesh_indices is not None:
             kwargs["mesh_indices"] = mesh_indices
@@ -179,19 +195,19 @@ if __name__ == "__main__":
     # Benchmark all 4 combinations
     time_1_fused, mem_before_1_fused, mem_after_1_fused, mem_peak_1_fused, mem_used_1_fused, pos_1_fused, dist_1_fused = benchmark_raycast(
         raycaster_independent, "raycast_fused",
-        translations.reshape(N * M, 1, 3),
-        quaternions.reshape(N * M, 1, 4),
+        translations,
+        quaternions,
         ray_starts, ray_dirs,
-        mesh_indices=torch.arange(N * M, device="cuda").reshape(N * M, 1),
+        mesh_indices=mesh_indices,
         description="Option 1 (independent meshes) - FUSED"
     )
     
     time_1_nonfused, mem_before_1_nonfused, mem_after_1_nonfused, mem_peak_1_nonfused, mem_used_1_nonfused, pos_1_nonfused, dist_1_nonfused = benchmark_raycast(
         raycaster_independent, "raycast",
-        translations.reshape(N * M, 1, 3),
-        quaternions.reshape(N * M, 1, 4),
+        translations,
+        quaternions,
         ray_starts, ray_dirs,
-        mesh_indices=torch.arange(N * M, device="cuda").reshape(N * M, 1),
+        mesh_indices=mesh_indices,
         description="Option 1 (independent meshes) - NON-FUSED"
     )
     
@@ -273,6 +289,21 @@ if __name__ == "__main__":
     
     # Compare all against Option 1 Fused as reference
     ref_name, ref_pos, ref_dist = results[0]
+    
+    if N * M <= 64:
+        scene = trimesh.Scene()
+        # Make shapes_combined slightly transparent
+        shapes_combined.visual.face_colors = [128, 128, 128, 200]  # Gray color with slight transparency
+        scene.add_geometry(shapes_combined)
+        pcd = trimesh.PointCloud(pos_1_fused.reshape(-1, 3).cpu().numpy(), colors=[0., 0., 1.])
+        scene.add_geometry(pcd, node_name="Option 1 Fused")
+        pcd = trimesh.PointCloud(pos_2_fused.reshape(-1, 3).cpu().numpy(), colors=[0., 1., 0.])
+        scene.add_geometry(pcd, node_name="Option 2 Fused")
+        segments = torch.stack([ray_starts.reshape(-1, 3), pos_2_fused.reshape(-1, 3)], dim=1).cpu().numpy()
+        lines = trimesh.load_path(segments)
+        scene.add_geometry(lines, node_name="Option 2 Fused Segments")
+        scene.show()
+
     for name, pos, dist in results[1:]:
         pos_match = torch.allclose(ref_pos, pos, atol=1e-5)
         dist_match = torch.allclose(ref_dist, dist, atol=1e-5)
