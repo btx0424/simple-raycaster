@@ -167,9 +167,9 @@ class MultiMeshRaycaster:
         
         Note:
             - This method automatically initializes the raycaster if not already initialized.
-            - The coordinate transformation (world to mesh-local) is performed on the CPU
-              before calling the GPU kernel, unlike `raycast_fused()` which performs the
-              transformation on the GPU.
+            - The coordinate transformation (world to mesh-local) is performed with PyTorch
+              on the GPU, then passed to a separate Warp raycast kernel. Unlike
+              `raycast_fused()`, the transform and raycast are not fused into one kernel.
             - When `mesh_indices` is provided, the second dimension of `mesh_pos_w` and
               `mesh_quat_w` should match `mesh_indices.shape[1]`, not necessarily `n_meshes`.
             - All input tensors must be on the same device as the raycaster.
@@ -325,8 +325,9 @@ class MultiMeshRaycaster:
         
         Note:
             - This method automatically initializes the raycaster if not already initialized.
-            - The coordinate transformation (world to mesh-local) is performed on the GPU
-              within the kernel, making this more memory-efficient than `raycast()`.
+            - The coordinate transformation (world to mesh-local) and raycast are fused
+              into a single Warp kernel, reducing intermediate allocations compared to
+              `raycast()`.
             - When `mesh_indices` is provided, the second dimension of `mesh_pos_w` and
               `mesh_quat_w` should match `mesh_indices.shape[1]`, not necessarily `n_meshes`.
             - Quaternions are converted from WXYZ to XYZW format internally for Warp compatibility.

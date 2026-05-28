@@ -10,8 +10,8 @@ This script benchmarks two different mesh organization strategies:
    selective mesh testing.
 
 For each strategy, the script compares two implementations:
-- FUSED: Performs coordinate transformations on the GPU within the kernel (raycast_fused)
-- NON-FUSED: Performs coordinate transformations on the CPU before calling the GPU kernel (raycast)
+- FUSED: transform + raycast in one Warp kernel (`raycast_fused`)
+- NON-FUSED: GPU PyTorch transform, then a separate Warp raycast kernel (`raycast`)
 
 The script measures:
 - Execution time per iteration (ms)
