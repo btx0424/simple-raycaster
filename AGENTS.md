@@ -8,7 +8,8 @@ Agent-oriented guide for working in `simple-raycaster`. Also check the [Warp cha
 src/simple_raycaster/
   raycaster.py      # MultiMeshRaycaster (manual poses)
   raycaster_v2.py   # MultiMeshRaycasterV2 (Isaac entity poses)
-  kernels.py        # Warp raycast + fused transform kernels
+  proximity.py      # MeshProximitySensor (closest-point / SDF-style queries)
+  kernels.py        # Warp raycast + fused transform + proximity kernels
   helpers.py        # trimesh→wp conversion, quat math, voxelize_* utilities
   utils_usd.py      # USD prim search + trimesh extraction
   utils_mjc.py      # MuJoCo body → trimesh extraction
@@ -17,7 +18,7 @@ scripts/
   advanced.py       # perf / correctness benchmark
 ```
 
-Public exports (`__init__.py`): `MultiMeshRaycaster`, `MultiMeshRaycasterV2`.
+Public exports (`__init__.py`): `MultiMeshRaycaster`, `MultiMeshRaycasterV2`, `MeshProximitySensor`.
 
 ## Which Raycaster to Use
 
@@ -38,9 +39,17 @@ Public exports (`__init__.py`): `MultiMeshRaycaster`, `MultiMeshRaycasterV2`.
 * Batch size `N` is validated at raycast time against `entity.num_instances`.
 * TODO in source: add non-Isaac backends — do not assume V2 works outside Isaac Sim today.
 
+### `MeshProximitySensor` (`proximity.py`)
+
+* Closest-point queries via Warp `mesh_query_point_no_sign` (or `sign_normal` when `signed=True`).
+* Reuses `MultiMeshRaycasterV2` registration (`add_isaac_static` / `add_isaac_entity`), or accepts an existing raycaster via `meshes=` to share geometry with raycasting.
+* `query(positions_w [N, n_points, 3], max_dist=...)` → `(closest_pos_w, distances)`.
+* Same `enabled` / `mesh_indices` kwargs as the raycasters. Misses return `max_dist` with `closest_pos_w == positions_w`.
+* Observation wiring (active-adaptation): build the sensor in an obs term `_initialize`, sample probe points each step, call `query`.
+
 ## Raycast Methods
 
-Both classes implement the same two entry points:
+Both raycaster classes implement the same two entry points:
 
 | Method | Pipeline | When to prefer |
 | --- | --- | --- |
