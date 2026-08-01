@@ -24,6 +24,8 @@ Use `device="cuda"` in production. `device="cpu"` is supported only for special 
 
 Quaternions are **WXYZ** (scalar first). Ray directions should be normalized. Misses return `max_dist` as the hit distance.
 
+Both methods return `(hit_positions, hit_distances, hit_normals)`. Normals are world-frame face normals at the closest hit; misses and disabled batch elements get zero normals.
+
 # Installation
 
 ```bash
@@ -78,7 +80,7 @@ ray_dirs = ray_dirs / ray_dirs.norm(dim=-1, keepdim=True)
 mesh_pos = torch.zeros(N, 2, 3, device="cuda")
 mesh_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N, 2, 4)
 
-hit_positions, hit_distances = raycaster.raycast_fused(
+hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
     mesh_pos,
     mesh_quat,
     ray_starts,
@@ -112,7 +114,7 @@ N = env.num_envs
 ray_starts = ...  # [N, n_rays, 3]
 ray_dirs = ...    # [N, n_rays, 3], normalized
 
-hit_positions, hit_distances = raycaster.raycast_fused(
+hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
     ray_starts,
     ray_dirs,
     min_dist=0.1,
@@ -167,7 +169,7 @@ mesh_indices = torch.tensor([
     [1, 2],
 ], device="cuda")
 
-hit_positions, hit_distances = raycaster.raycast_fused(
+hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
     mesh_pos,
     mesh_quat,
     ray_starts,

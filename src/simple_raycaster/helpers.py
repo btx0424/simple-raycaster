@@ -14,6 +14,21 @@ def trimesh2wp(mesh: trimesh.Trimesh, device):
     )
 
 
+def quat_rotate(quat: torch.Tensor, vec: torch.Tensor):
+    """Apply a quaternion rotation to a vector.
+
+    Args:
+        quat: The quaternion in (w, x, y, z). Shape is (..., 4).
+        vec: The vector in (x, y, z). Shape is (..., 3).
+
+    Returns:
+        The rotated vector in (x, y, z). Shape is (..., 3).
+    """
+    xyz = quat[..., 1:]
+    t = xyz.cross(vec, dim=-1) * 2
+    return vec + quat[..., 0:1] * t + xyz.cross(t, dim=-1)
+
+
 def quat_rotate_inverse(quat: torch.Tensor, vec: torch.Tensor):
     """Apply an inverse quaternion rotation to a vector.
 

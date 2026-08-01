@@ -183,7 +183,7 @@ def main():
         
         start_event.record()
         for _ in range(num_iterations):
-            hit_positions, hit_distances = method(**kwargs)
+            hit_positions, hit_distances, hit_normals = method(**kwargs)
             wp.synchronize()
         end_event.record()
         torch.cuda.synchronize()

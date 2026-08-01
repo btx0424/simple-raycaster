@@ -10,10 +10,12 @@ def raycast_kernel(
     min_dist: float,
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=3),
+    hit_normals: wp.array(dtype=wp.vec3, ndim=3),
 ):
     i, mesh_id, ray_id = wp.tid()
     if not enabled[i]:
         hit_distances[i, mesh_id, ray_id] = wp.INF
+        hit_normals[i, mesh_id, ray_id] = wp.vec3(0.0, 0.0, 0.0)
         return
     mesh = meshes[mesh_id]
     ray_start = ray_starts[i, mesh_id, ray_id]
@@ -25,9 +27,13 @@ def raycast_kernel(
         max_dist,
     )
     t = max_dist
+    # normal is in mesh-local frame; caller rotates it back to world
+    normal = wp.vec3(0.0, 0.0, 0.0)
     if result.result and result.t >= min_dist:
         t = result.t
+        normal = result.normal
     hit_distances[i, mesh_id, ray_id] = t
+    hit_normals[i, mesh_id, ray_id] = normal
 
 
 @wp.kernel(enable_backward=False)
@@ -40,11 +46,13 @@ def raycast_against_meshes_kernel(
     min_dist: float,
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=3),
+    hit_normals: wp.array(dtype=wp.vec3, ndim=3),
 ):
     i, j, ray_id = wp.tid()
     mesh_id = mesh_indices[i, j]
     if not enabled[i]:
         hit_distances[i, j, ray_id] = wp.INF
+        hit_normals[i, j, ray_id] = wp.vec3(0.0, 0.0, 0.0)
         return
     mesh = meshes[mesh_id]
     ray_start = ray_starts[i, j, ray_id]
@@ -56,9 +64,13 @@ def raycast_against_meshes_kernel(
         max_dist,
     )
     t = max_dist
+    # normal is in mesh-local frame; caller rotates it back to world
+    normal = wp.vec3(0.0, 0.0, 0.0)
     if result.result and result.t >= min_dist:
         t = result.t
+        normal = result.normal
     hit_distances[i, j, ray_id] = t
+    hit_normals[i, j, ray_id] = normal
 
 
 @wp.kernel(enable_backward=False)
@@ -72,10 +84,12 @@ def transform_and_raycast_kernel(
     min_dist: float,
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=3),
+    hit_normals: wp.array(dtype=wp.vec3, ndim=3),
 ):
     i, mesh_id, ray_id = wp.tid()
     if not enabled[i]:
         hit_distances[i, mesh_id, ray_id] = wp.INF
+        hit_normals[i, mesh_id, ray_id] = wp.vec3(0.0, 0.0, 0.0)
         return
     
     # transform ray starts and dirs to mesh frame
@@ -97,9 +111,13 @@ def transform_and_raycast_kernel(
         max_dist,
     )
     t = max_dist
+    normal_w = wp.vec3(0.0, 0.0, 0.0)
     if result.result and result.t >= min_dist:
         t = result.t
+        # rotate mesh-local normal back to world frame
+        normal_w = wp.quat_rotate(quat_xyzw, result.normal)
     hit_distances[i, mesh_id, ray_id] = t
+    hit_normals[i, mesh_id, ray_id] = normal_w
 
 
 @wp.kernel(enable_backward=False)
@@ -114,11 +132,13 @@ def transform_and_raycast_against_meshes_kernel(
     min_dist: float,
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=3),
+    hit_normals: wp.array(dtype=wp.vec3, ndim=3),
 ):
     i, j, ray_id = wp.tid()
     mesh_id = mesh_indices[i, j]
     if not enabled[i]:
         hit_distances[i, j, ray_id] = wp.INF
+        hit_normals[i, j, ray_id] = wp.vec3(0.0, 0.0, 0.0)
         return
     
     # transform ray starts and dirs to mesh frame
@@ -140,10 +160,13 @@ def transform_and_raycast_against_meshes_kernel(
         max_dist,
     )
     t = max_dist
+    normal_w = wp.vec3(0.0, 0.0, 0.0)
     if result.result and result.t >= min_dist:
         t = result.t
+        # rotate mesh-local normal back to world frame
+        normal_w = wp.quat_rotate(quat_xyzw, result.normal)
     hit_distances[i, j, ray_id] = t
-
+    hit_normals[i, j, ray_id] = normal_w
 
 @wp.func
 def _query_closest_point(

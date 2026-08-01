@@ -6,7 +6,7 @@ import warp as wp
 
 from typing import Optional, List, Union, TYPE_CHECKING
 from jaxtyping import Float, Bool, Int
-from .helpers import quat_rotate_inverse, trimesh2wp
+from .helpers import quat_rotate, quat_rotate_inverse, trimesh2wp
 from .kernels import (
     raycast_kernel,
     raycast_against_meshes_kernel,
@@ -213,7 +213,7 @@ class MultiMeshRaycasterV2:
         *,
         enabled: Optional[Bool[torch.Tensor, "N"]]=None,  # [N]
         mesh_indices: Optional[Int[torch.Tensor, "N n_meshes"]]=None,  # [N, n_meshes]
-    ) -> tuple[Float[torch.Tensor, "N n_rays 3"], Float[torch.Tensor, "N n_rays"]]:
+    ) -> tuple[Float[torch.Tensor, "N n_rays 3"], Float[torch.Tensor, "N n_rays"], Float[torch.Tensor, "N n_rays 3"]]:
         if not self.initialized:
             self.initialize()
 
@@ -234,6 +234,7 @@ class MultiMeshRaycasterV2:
             ray_dirs_b = quat_rotate_inverse(mesh_quat_w, ray_dirs_w.unsqueeze(1))
 
             hit_distances = torch.empty(result_shape, device=ray_starts_w.device)
+            hit_normals = torch.empty(*result_shape, 3, device=ray_starts_w.device)
             wp.launch(
                 raycast_kernel,
                 dim=(N, self.n_meshes, n_rays),
@@ -246,7 +247,8 @@ class MultiMeshRaycasterV2:
                     max_dist,
                 ],
                 outputs=[
-                    wp.from_torch(hit_distances, dtype=wp.float32),
+                    wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
                 ],
                 device=self.device,
                 record_tape=False,
@@ -264,6 +266,7 @@ class MultiMeshRaycasterV2:
             ray_dirs_b = quat_rotate_inverse(mesh_quat_w, ray_dirs_w.unsqueeze(1))
 
             hit_distances = torch.empty(result_shape, device=ray_starts_w.device)
+            hit_normals = torch.empty(*result_shape, 3, device=ray_starts_w.device)
             wp.launch(
                 raycast_against_meshes_kernel,
                 dim=(N, n_meshes, n_rays),
@@ -277,15 +280,23 @@ class MultiMeshRaycasterV2:
                     max_dist,
                 ],
                 outputs=[
-                    wp.from_torch(hit_distances, dtype=wp.float32),
+                    wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
                 ],
                 device=self.device,
                 record_tape=False,
             )
 
-        hit_distances = hit_distances.min(dim=1).values
+        # kernel returns normals in mesh-local frame; rotate back to world
+        hit_normals = quat_rotate(mesh_quat_w, hit_normals)
+
+        min_result = hit_distances.min(dim=1)
+        hit_distances = min_result.values  # [N, n_rays]
+        # select the normal of the closest-hit mesh for each ray
+        gather_idx = min_result.indices.unsqueeze(1).unsqueeze(-1).expand(-1, -1, -1, 3)
+        hit_normals = hit_normals.gather(1, gather_idx).squeeze(1)  # [N, n_rays, 3]
         hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
-        return hit_positions, hit_distances
+        return hit_positions, hit_distances, hit_normals
     
     def raycast_fused(
         self,
@@ -296,7 +307,7 @@ class MultiMeshRaycasterV2:
         *,
         enabled: Optional[Bool[torch.Tensor, "N"]]=None,  # [N]
         mesh_indices: Optional[Int[torch.Tensor, "N n_meshes"]]=None,  # [N, n_meshes]
-    ) -> tuple[Float[torch.Tensor, "N n_rays 3"], Float[torch.Tensor, "N n_rays"]]:
+    ) -> tuple[Float[torch.Tensor, "N n_rays 3"], Float[torch.Tensor, "N n_rays"], Float[torch.Tensor, "N n_rays 3"]]:
         """
         Perform raycasting against multiple meshes using a fused GPU kernel.
         
@@ -343,6 +354,9 @@ class MultiMeshRaycasterV2:
                   hit point. Shape [N, n_rays]. Values are in the range [min_dist, max_dist],
                   or `max_dist` if no hit occurred. The minimum is taken across all meshes
                   for each ray.
+                - hit_normals (torch.Tensor): The world-frame face normals at the closest
+                  hit points. Shape [N, n_rays, 3]. Zero vectors for rays that miss or for
+                  disabled batch elements.
         
         Note:
             - This method automatically initializes the raycaster if not already initialized.
@@ -359,7 +373,7 @@ class MultiMeshRaycasterV2:
             >>> ray_starts = torch.randn(10, 100, 3, device="cuda")  # 100 rays per batch
             >>> ray_dirs = torch.randn(10, 100, 3, device="cuda")
             >>> ray_dirs = ray_dirs / ray_dirs.norm(dim=-1, keepdim=True)  # normalize
-            >>> hit_pos, hit_dist = raycaster.raycast_fused(
+            >>> hit_pos, hit_dist, hit_normal = raycaster.raycast_fused(
             ...     ray_starts, ray_dirs,
             ...     min_dist=0.1, max_dist=50.0
             ... )
@@ -378,6 +392,7 @@ class MultiMeshRaycasterV2:
         if mesh_indices is None:
             result_shape = (N, self.n_meshes, n_rays)
             hit_distances = torch.empty(result_shape, device=ray_starts_w.device)
+            hit_normals = torch.empty(*result_shape, 3, device=ray_starts_w.device)
             wp.launch(
                 transform_and_raycast_kernel,
                 dim=(N, self.n_meshes, n_rays),
@@ -392,7 +407,8 @@ class MultiMeshRaycasterV2:
                     max_dist,
                 ],
                 outputs=[
-                    wp.from_torch(hit_distances, dtype=wp.float32),
+                    wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
                 ],
                 device=self.device,
                 record_tape=False,
@@ -404,6 +420,7 @@ class MultiMeshRaycasterV2:
             n_meshes = mesh_indices.shape[1]
             result_shape = (N, n_meshes, n_rays)
             hit_distances = torch.empty(result_shape, device=ray_starts_w.device)
+            hit_normals = torch.empty(*result_shape, 3, device=ray_starts_w.device)
             wp.launch(
                 transform_and_raycast_against_meshes_kernel,
                 dim=(N, mesh_indices.shape[1], n_rays),
@@ -419,15 +436,20 @@ class MultiMeshRaycasterV2:
                     max_dist,
                 ],
                 outputs=[
-                    wp.from_torch(hit_distances, dtype=wp.float32),
+                    wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
                 ],
                 device=self.device,
                 record_tape=False,
             )
         
-        hit_distances = hit_distances.min(dim=1).values # [N, n_rays]
+        min_result = hit_distances.min(dim=1)
+        hit_distances = min_result.values # [N, n_rays]
+        # select the normal of the closest-hit mesh for each ray (already world-frame)
+        gather_idx = min_result.indices.unsqueeze(1).unsqueeze(-1).expand(-1, -1, -1, 3)
+        hit_normals = hit_normals.gather(1, gather_idx).squeeze(1) # [N, n_rays, 3]
         hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w # [N, n_rays, 3]
-        return hit_positions, hit_distances
+        return hit_positions, hit_distances, hit_normals
 
     @property
     def n_points(self):

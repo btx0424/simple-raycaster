@@ -63,7 +63,7 @@ Shared kwargs (keyword-only after ray args):
 * `enabled: Bool[N]` — disabled batches get `inf` distance before the min reduction
 * `mesh_indices: Int[N, n_subset]` — index into the global mesh array per batch row
 
-Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays])`. Closest hit across meshes is taken with `.min(dim=1)`.
+Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays], hit_normals_w [N, n_rays, 3])`. Closest hit across meshes is taken with `.min(dim=1)`; the normal of the winning mesh is gathered with the argmin indices. Normals are world-frame face normals (fused kernels rotate them in-kernel; the non-fused path rotates in Python). Misses and disabled batches get zero normals.
 
 ## Conventions
 

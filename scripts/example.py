@@ -130,7 +130,7 @@ if __name__ == "__main__":
     voxelize_func = voxelize_wp
     
     for i in tqdm(range(T)):
-        hit_positions, hit_distances = raycast_func(
+        hit_positions, hit_distances, hit_normals = raycast_func(
             translations.expand(N, *translations.shape),
             quats.expand(N, *quats.shape),
             ray_starts.expand(N, *ray_starts.shape),
