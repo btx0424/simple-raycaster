@@ -1,12 +1,19 @@
 import trimesh
 import numpy as np
-import warp as wp
 import re
 from typing import Callable
 
 from pxr import Usd, UsdGeom
 
 def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] = lambda _: True):
+    """Extract all Mesh/Cube geometry under ``prim`` as one combined trimesh.
+
+    The result is expressed in the frame of ``prim``: each mesh's local-to-world
+    transform is composed with the inverse of ``prim``'s **rigid** (rotation +
+    translation) world transform. Scale/shear anywhere in the hierarchy —
+    including on ``prim`` itself — is baked into the vertices, since runtime
+    poses (e.g. ``body_link_pose_w``) carry no scale.
+    """
     mesh_prims = get_mesh_prims_subtree(prim, predicate)
     if len(mesh_prims) == 0:
         raise ValueError(f"No mesh primitives found in {prim.GetPath().pathString}")
@@ -14,15 +21,16 @@ def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] 
     trimesh_list = []
     time = Usd.TimeCode.Default()
     parent_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    # cancel only the rigid part of the parent pose; keep scale/shear baked
+    parent_rigid_inv = parent_transform.RemoveScaleShear().GetInverse()
     
-    # print(prim, parent_transform.ExtractTranslation(), parent_transform.ExtractRotationQuat())
     for mesh_prim in mesh_prims:
         mesh = usd2trimesh(mesh_prim)
         transform = UsdGeom.Xformable(mesh_prim).ComputeLocalToWorldTransform(time)
         if mesh_prim.IsInPrototype():
             pass # no global transform for prototype meshes
         else:
-            transform = transform * parent_transform.GetInverse()
+            transform = transform * parent_rigid_inv
 
         transform_np = np.array(transform).transpose()
         mesh.apply_transform(transform_np)
@@ -76,9 +84,32 @@ def _get_cube_extents(cube_prim: Usd.Prim) -> np.ndarray:
     return np.array([2.0, 2.0, 2.0])
 
 
+def _triangulate(indices: np.ndarray, counts: np.ndarray) -> np.ndarray:
+    """Fan-triangulate USD face data (mixed polygon sizes) into an [F, 3] array.
+
+    Assumes faces are convex, which holds for the usual USD sources (tris,
+    quads, e.g. ground planes). Faces with fewer than 3 vertices are skipped.
+    """
+    if np.all(counts == 3):
+        return indices.reshape(-1, 3)
+    faces = []
+    offset = 0
+    for c in counts:
+        poly = indices[offset:offset + c]
+        for i in range(1, c - 1):
+            faces.append((poly[0], poly[i], poly[i + 1]))
+        offset += c
+    return np.asarray(faces, dtype=np.int64)
+
+
 def usd2trimesh(prim: Usd.Prim):
     """
     Convert a USD prim (Mesh or Cube) to a trimesh.Trimesh object.
+
+    Vertices are in the prim's local frame (xformOps, including scale, are
+    applied by the caller via the prim's transform). Polygonal faces (e.g.
+    quad ground planes) are fan-triangulated, and left-handed meshes are
+    flipped to right-handed winding.
 
     Args:
         prim: The USD prim to convert (UsdGeom.Mesh or UsdGeom.Cube).
@@ -87,27 +118,20 @@ def usd2trimesh(prim: Usd.Prim):
         return trimesh.creation.box(extents=_get_cube_extents(prim))
     mesh = UsdGeom.Mesh(prim)
     vertices = np.asarray(mesh.GetPointsAttr().Get())
-    faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
-    mesh = trimesh.Trimesh(vertices, faces.reshape(-1, 3))
-    return mesh
+    indices = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
+    counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get())
+    faces = _triangulate(indices, counts)
+    if mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.leftHanded:
+        faces = faces[:, ::-1]
+    return trimesh.Trimesh(vertices, faces)
 
 
 def usd2wp(prim: Usd.Prim, device):
     """
     Convert a USD prim (Mesh or Cube) to a wp.Mesh object.
     """
-    if prim.GetTypeName() == "Cube":
-        box = trimesh.creation.box(extents=_get_cube_extents(prim))
-        vertices = np.asarray(box.vertices)
-        faces = np.asarray(box.faces)
-    else:
-        mesh = UsdGeom.Mesh(prim)
-        vertices = np.asarray(mesh.GetPointsAttr().Get())
-        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
-    return wp.Mesh(
-        points=wp.array(vertices.astype(np.float32), dtype=wp.vec3, device=device),
-        indices=wp.array(faces.astype(np.int32).flatten(), dtype=wp.int32, device=device),
-    )
+    from .helpers import trimesh2wp
+    return trimesh2wp(usd2trimesh(prim), device)
 
 
 def find_matching_prims(prim_path_regex: str, stage: Usd.Stage):
