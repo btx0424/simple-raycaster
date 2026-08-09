@@ -14,6 +14,27 @@ def trimesh2wp(mesh: trimesh.Trimesh, device):
     )
 
 
+def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
+    """Convert quaternions ``(w, x, y, z)`` → rotation matrices ``(..., 3, 3)``."""
+    r, i, j, k = torch.unbind(quaternions, -1)
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+
 def quat_rotate(quat: torch.Tensor, vec: torch.Tensor):
     """Apply a quaternion rotation to a vector.
 

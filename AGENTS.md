@@ -6,19 +6,34 @@ Agent-oriented guide for working in `simple-raycaster`. Also check the [Warp cha
 
 ```
 src/simple_raycaster/
-  raycaster.py      # MultiMeshRaycaster (manual poses)
-  raycaster_v2.py   # MultiMeshRaycasterV2 (Isaac entity poses)
-  proximity.py      # MeshProximitySensor (closest-point / SDF-style queries)
-  kernels.py        # Warp raycast + fused transform + proximity kernels
-  helpers.py        # trimesh→wp conversion, quat math, voxelize_* utilities
-  utils_usd.py      # USD prim search + trimesh extraction
-  utils_mjc.py      # MuJoCo body → trimesh extraction
+  raycaster.py       # MultiMeshRaycaster (manual poses)
+  raycaster_v2.py    # MultiMeshRaycasterV2 (Isaac entity poses)
+  proximity.py       # MeshProximitySensor (closest-point / SDF-style queries)
+  raycast_camera.py  # RaycastCamera — Warp RGB-D megakernel
+  diffrast_camera.py # DiffrastCamera — nvdiffrast RGB-D (optional dep)
+  mesh_cache.py      # CachedEntityMesh + simplify / pose helpers
+  mesh_rgbd.py       # MeshRGBDRenderer factory (diffrast | raycast)
+  kernels.py         # Warp raycast + fused transform + proximity + camera kernels
+  helpers.py         # trimesh→wp conversion, quat math, voxelize_* utilities
+  utils_usd.py       # USD prim search + trimesh extraction
+  utils_mjc.py       # MuJoCo body → trimesh extraction
 scripts/
-  example.py        # end-to-end USD/MJCF demo
-  advanced.py       # perf / correctness benchmark
+  example.py         # end-to-end USD/MJCF demo
+  advanced.py        # perf / correctness benchmark
 ```
 
-Public exports (`__init__.py`): `MultiMeshRaycaster`, `MultiMeshRaycasterV2`, `MeshProximitySensor`.
+Public exports include raycasters, `RaycastCamera`, `DiffrastCamera`,
+`make_mesh_rgbd_renderer`, and mesh-cache helpers. Optional: `pip install .[diffrast]`.
+
+### Mesh RGB-D cameras (`raycast_camera.py` / `diffrast_camera.py`)
+
+* Pinhole **RGB-D** mesh renderers for 3DGS composite in active-adaptation
+  (`task.visual.mesh_renderer: diffrast|raycast`). AA only depth-composites.
+* **Not** a replacement for AA’s MDP obs `extero.raycast_camera` — that stays on
+  `MultiMeshRaycasterV2` for range sensing.
+* Shared API shape: register / bind body-local meshes, then
+  `render(cam_pos, cam_quat, …) → (rgb, depth, mask)` (OpenCV convention).
+* Prefer `make_mesh_rgbd_renderer("diffrast"|"raycast")` for multi-entity use.
 
 ## Which Raycaster to Use
 

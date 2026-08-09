@@ -22,6 +22,9 @@ dependencies = [
     "jaxtyping"
 ]
 
+[project.optional-dependencies]
+diffrast = ["nvdiffrast"]
+
 [project.urls]
 "Source Code" = "https://github.com/btx0424/simple-raycaster"
 
