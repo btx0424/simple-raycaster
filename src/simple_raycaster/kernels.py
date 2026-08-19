@@ -168,6 +168,89 @@ def transform_and_raycast_against_meshes_kernel(
     hit_distances[i, j, ray_id] = t
     hit_normals[i, j, ray_id] = normal_w
 
+
+@wp.kernel(enable_backward=False)
+def transform_and_raycast_closest_kernel(
+    meshes: wp.array(dtype=wp.uint64),
+    mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),
+    ray_starts_w: wp.array(dtype=wp.vec3, ndim=2),
+    ray_dirs_w: wp.array(dtype=wp.vec3, ndim=2),
+    enabled: wp.array(dtype=wp.bool, ndim=1),
+    min_dist: float,
+    max_dist: float,
+    hit_distances: wp.array(dtype=wp.float32, ndim=2),
+    hit_normals: wp.array(dtype=wp.vec3, ndim=2),
+):
+    """Fused world→mesh transform + closest-hit raycast. Writes ``[N, n_rays]``."""
+    i, ray_id = wp.tid()
+    if not enabled[i]:
+        hit_distances[i, ray_id] = wp.INF
+        hit_normals[i, ray_id] = wp.vec3(0.0, 0.0, 0.0)
+        return
+
+    n_meshes = int(mesh_pos_w.shape[1])
+    ray_start_w = ray_starts_w[i, ray_id]
+    ray_dir_w = ray_dirs_w[i, ray_id]
+    best_t = float(max_dist)
+    best_n = wp.vec3(0.0, 0.0, 0.0)
+
+    for m in range(n_meshes):
+        quat_wxyz = mesh_quat_w[i, m]
+        quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
+        ray_start_b = wp.quat_rotate_inv(quat_xyzw, ray_start_w - mesh_pos_w[i, m])
+        ray_dir_b = wp.quat_rotate_inv(quat_xyzw, ray_dir_w)
+        result = wp.mesh_query_ray(meshes[m], ray_start_b, ray_dir_b, max_dist)
+        if result.result and result.t >= min_dist and result.t < best_t:
+            best_t = result.t
+            best_n = wp.quat_rotate(quat_xyzw, result.normal)
+
+    hit_distances[i, ray_id] = best_t
+    hit_normals[i, ray_id] = best_n
+
+
+@wp.kernel(enable_backward=False)
+def transform_and_raycast_closest_against_meshes_kernel(
+    meshes: wp.array(dtype=wp.uint64),
+    mesh_indices: wp.array(dtype=wp.int64, ndim=2),
+    mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),
+    ray_starts_w: wp.array(dtype=wp.vec3, ndim=2),
+    ray_dirs_w: wp.array(dtype=wp.vec3, ndim=2),
+    enabled: wp.array(dtype=wp.bool, ndim=1),
+    min_dist: float,
+    max_dist: float,
+    hit_distances: wp.array(dtype=wp.float32, ndim=2),
+    hit_normals: wp.array(dtype=wp.vec3, ndim=2),
+):
+    """Closest-hit fused raycast against a per-batch mesh subset."""
+    i, ray_id = wp.tid()
+    if not enabled[i]:
+        hit_distances[i, ray_id] = wp.INF
+        hit_normals[i, ray_id] = wp.vec3(0.0, 0.0, 0.0)
+        return
+
+    n_subset = int(mesh_indices.shape[1])
+    ray_start_w = ray_starts_w[i, ray_id]
+    ray_dir_w = ray_dirs_w[i, ray_id]
+    best_t = float(max_dist)
+    best_n = wp.vec3(0.0, 0.0, 0.0)
+
+    for j in range(n_subset):
+        mesh_id = int(mesh_indices[i, j])
+        quat_wxyz = mesh_quat_w[i, j]
+        quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
+        ray_start_b = wp.quat_rotate_inv(quat_xyzw, ray_start_w - mesh_pos_w[i, j])
+        ray_dir_b = wp.quat_rotate_inv(quat_xyzw, ray_dir_w)
+        result = wp.mesh_query_ray(meshes[mesh_id], ray_start_b, ray_dir_b, max_dist)
+        if result.result and result.t >= min_dist and result.t < best_t:
+            best_t = result.t
+            best_n = wp.quat_rotate(quat_xyzw, result.normal)
+
+    hit_distances[i, ray_id] = best_t
+    hit_normals[i, ray_id] = best_n
+
+
 @wp.func
 def _query_closest_point(
     mesh: wp.uint64,

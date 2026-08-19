@@ -1,8 +1,10 @@
+from typing import Optional
+
 import mujoco
 import trimesh
 
 
-def get_trimesh_from_body(body, model: mujoco.MjModel):
+def get_trimesh_from_body(body, model: mujoco.MjModel) -> Optional[trimesh.Trimesh]:
     geomadr = body.geomadr.item()
     geomnum = body.geomnum.item()
 
@@ -29,6 +31,8 @@ def get_trimesh_from_body(body, model: mujoco.MjModel):
         )
         mesh.apply_transform(transform)
         trimesh_list.append(mesh)
+    if not trimesh_list:
+        return None
     trimesh_combined: trimesh.Trimesh = trimesh.util.concatenate(trimesh_list)
     trimesh_combined.merge_vertices()
     return trimesh_combined

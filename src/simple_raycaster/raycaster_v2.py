@@ -12,6 +12,8 @@ from .kernels import (
     raycast_against_meshes_kernel,
     transform_and_raycast_kernel,
     transform_and_raycast_against_meshes_kernel,
+    transform_and_raycast_closest_kernel,
+    transform_and_raycast_closest_against_meshes_kernel,
 )
 
 
@@ -307,6 +309,7 @@ class MultiMeshRaycasterV2:
         *,
         enabled: Optional[Bool[torch.Tensor, "N"]]=None,  # [N]
         mesh_indices: Optional[Int[torch.Tensor, "N n_meshes"]]=None,  # [N, n_meshes]
+        closest_hit: bool = True,
     ) -> tuple[Float[torch.Tensor, "N n_rays 3"], Float[torch.Tensor, "N n_rays"], Float[torch.Tensor, "N n_rays 3"]]:
         """
         Perform raycasting against multiple meshes using a fused GPU kernel.
@@ -388,6 +391,58 @@ class MultiMeshRaycasterV2:
             enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
         else:
             enabled = enabled.reshape(N,)
+
+        if closest_hit:
+            hit_distances = torch.empty((N, n_rays), device=ray_starts_w.device)
+            hit_normals = torch.empty(N, n_rays, 3, device=ray_starts_w.device)
+            if mesh_indices is None:
+                wp.launch(
+                    transform_and_raycast_closest_kernel,
+                    dim=(N, n_rays),
+                    inputs=[
+                        self.meshes_array,
+                        wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
+                        wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                        min_dist,
+                        max_dist,
+                    ],
+                    outputs=[
+                        wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                        wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                    ],
+                    device=self.device,
+                    record_tape=False,
+                )
+            else:
+                assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
+                    "`mesh_indices` must have the same number of meshes as `mesh_pos_w` and `mesh_quat_w`"
+                )
+                wp.launch(
+                    transform_and_raycast_closest_against_meshes_kernel,
+                    dim=(N, n_rays),
+                    inputs=[
+                        self.meshes_array,
+                        wp.from_torch(mesh_indices, dtype=wp.int64, return_ctype=True),
+                        wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
+                        wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                        min_dist,
+                        max_dist,
+                    ],
+                    outputs=[
+                        wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                        wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                    ],
+                    device=self.device,
+                    record_tape=False,
+                )
+            hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+            return hit_positions, hit_distances, hit_normals
 
         if mesh_indices is None:
             result_shape = (N, self.n_meshes, n_rays)
