@@ -4,8 +4,43 @@ Working document for optimizing `simple-raycaster` on a realistic camera workloa
 This refines the original stub (test scene + Warp review + measure/iterate) using
 the current code, `AGENTS.md`, and the Warp 1.7–1.16 APIs we can actually use.
 
-**Status:** plan only. Next step is the benchmark harness in §4, then a measured
-baseline before any kernel change.
+**Status:** Round 1 done (in-kernel closest-hit). Next is Step 2 on this Warp 1.6
+venv (`bvh_constructor` sah/lbvh/median only — no cuBQL / `bvh_leaf_size`).
+
+Local env (do not push `.venv`):
+
+```bash
+proxy_on
+uv venv .venv --python 3.11
+uv pip install -e . --overrides /dev/stdin <<<'warp-lang==1.6.0'
+# Driver here is CUDA 12.8; default torch wheels may be cu13 and fail:
+uv pip install 'torch==2.8.*' --index-url https://download.pytorch.org/whl/cu128
+.venv/bin/python scripts/bench_g1_camera.py
+```
+
+## Round 1 results (2026-08-20)
+
+Scene: ground box + cube + G1 Inspire (`61` meshes, `270768` verts, `542386`
+faces). Headline: `N=64`, `128×96` OpenCV pinhole, fov `70°`, `max_dist=10`,
+RTX 4090, Warp **1.6.0**, torch `2.8.0+cu128`. Hit fraction `0.851`.
+
+| path | ms/iter | M rays/s | torch peak mem |
+| --- | ---: | ---: | ---: |
+| `lidar_fused_closest` (new default) | 1.858 | 423 | 48 MB |
+| `lidar_fused_legacy` (`closest_hit=False`) | 2.273 | 346 | 761 MB |
+| `lidar_unfused` | 28.610 | 27 | 3.96 GB |
+| `camera_rgbd` | 1.771 | 444 | 40 MB |
+
+- Closest-hit vs legacy fused: **1.22×** faster, **15.8×** less peak torch memory.
+- Parity: legacy vs closest distances/positions/normals **exact** (`max=0`).
+  Unfused vs closest `max abs dist 1.2e-6`. Camera ray-depth vs lidar `1.8e-5`.
+- `mesh_indices` subset path also matches legacy exactly.
+- Tiny batches can still favor the old `(N, n_meshes, n_rays)` launch (more
+  threads); G1 training-scale `N=64` favors the serial in-kernel min.
+- Peak memory is the **PyTorch** allocator only (Warp BVH lives outside it).
+
+`raycast_fused(..., closest_hit=True)` is the new default. Keep
+`closest_hit=False` until a later round deletes the 3D kernels.
 
 ## 1. Goal
 
@@ -15,10 +50,10 @@ object, and a G1 with many posed body meshes.
 
 Optimize both entry points that this scene exercises:
 
-| API | Typical use | Current closest-hit strategy |
+| API | Typical use | Closest-hit strategy |
 | --- | --- | --- |
-| `MultiMeshRaycaster.raycast_fused` | lidar / range obs | launch `(N, n_meshes, n_rays)`, write `[N, n_meshes, n_rays]`, then PyTorch `.min(dim=1)` |
-| `RaycastCamera.render` | RGB-D mesh camera | launch `(N, H*W)`, loop meshes **in-kernel**, write `[N, H*W]` |
+| `MultiMeshRaycaster.raycast_fused` | lidar / range obs | **Round 1:** launch `(N, n_rays)`, loop meshes in-kernel, write `[N, n_rays]`. Legacy `closest_hit=False` still uses the 3D buffer + PyTorch `.min(dim=1)`. |
+| `RaycastCamera.render` | RGB-D mesh camera | launch `(N, H*W)`, loop meshes in-kernel, write `[N, H*W]` |
 
 `raycast_fused` is the larger win. `RaycastCamera` already does in-kernel
 closest-hit; treat it as the pattern to copy, then tune BVH / launch / graphs.
@@ -165,31 +200,18 @@ peak memory by a clear margin on the G1 camera scene without breaking parity.
 Stop a line of work when two consecutive knobs move the headline `N=64,
 128×96` number by less than ~5% (or increase memory).
 
-### Step 0 — harness + baseline (no kernel changes)
+### Step 0 — harness + baseline (done)
 
-- Implement §3–§4.
-- Record baseline table: lidar fused/unfused + camera, `N` × resolution.
-- Confirm G1 mesh count / triangle count. If `from_MjModel` blows up on a
-  body with no mesh geoms, skip those bodies.
+- [x] `scripts/bench_g1_camera.py`
+- [x] G1 loads: 59 body meshes + ground + cube = 61; ~542k faces
+- [x] Empty mesh-geom bodies skipped in `from_MjModel`
 
-### Step 1 — fuse closest-hit into the lidar kernel (highest leverage)
+### Step 1 — fuse closest-hit into the lidar kernel (done)
 
-Copy the camera pattern: launch `(N, n_rays)`, loop meshes (or `mesh_indices`
-subset) inside the kernel, write `[N, n_rays]` distances and `[N, n_rays, 3]`
-world normals.
-
-- Touch: `kernels.py`, `raycaster.py`, `raycaster_v2.py` (same launch/output
-  contract). Keep the old 3D-output kernels behind a flag or as the unfused
-  debug path until parity is proven.
-- Prefer **serial min in-kernel** over `wp.atomic_min`. Atomics need a second
-  channel for the winning normal; Warp 1.15 also changed float `atomic_min`
-  NaN semantics. Revisit atomics only if a profiler shows the serial mesh
-  loop is occupancy-bound *and* `n_meshes` is large.
-- Deletes the `O(n_meshes)` intermediate buffer and the PyTorch
-  `min` + `gather`. Expected: large memory drop; time drop grows with
-  `n_meshes` (G1, not the 2-mesh `advanced.py` case).
-- Apply the same fused-output idea to `MeshProximitySensor` only after lidar
-  lands (same 3D-buffer smell).
+- [x] `transform_and_raycast_closest_kernel` (+ `mesh_indices` variant)
+- [x] Wired in `raycaster.py` / `raycaster_v2.py`; default `closest_hit=True`
+- [x] Serial in-kernel min (not `atomic_min`)
+- [ ] Same fused-output idea for `MeshProximitySensor` (later)
 
 ### Step 2 — BVH constructor / leaf size
 

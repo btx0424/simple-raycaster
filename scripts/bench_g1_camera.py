@@ -332,6 +332,17 @@ def main() -> None:
         mark = "ok" if row["ok"] else "FAIL"
         print(f"  [{mark}] {row['name']}: max={row['max_abs']:.3e} mean={row['mean_abs']:.3e}")
 
+    # Drop parity tensors so timed peak-memory is not polluted by 3D leftovers.
+    del pos_new, dist_new, nrm_new
+    if not args.skip_legacy:
+        del pos_old, dist_old, nrm_old
+    if not args.skip_unfused:
+        del pos_u, dist_u, nrm_u
+    if depth_cam is not None:
+        del rgb, depth_cam, mask, dist_img
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(torch_device)
+
     results = []
 
     def add_result(name: str, fn) -> None:
