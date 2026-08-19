@@ -39,6 +39,20 @@ RTX 4090, Warp **1.6.0**, torch `2.8.0+cu128`. Hit fraction `0.851`.
   threads); G1 training-scale `N=64` favors the serial in-kernel min.
 - Peak memory is the **PyTorch** allocator only (Warp BVH lives outside it).
 
+Scaling on the same scene / resolution (`128×96`, fused closest vs legacy). Unfused
+at `N=1024` was skipped: N=256 already peaked at ~16 GB and would not fit.
+
+| N | closest ms | legacy ms | speedup | closest peak | legacy peak | M rays/s closest |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 1.86 | 2.27 | 1.22× | 48 MB | 761 MB | 423 |
+| 256 | 5.07 | 8.02 | 1.58× | 192 MB | 2.97 GB | 621 |
+| 1024 | 18.19 | 29.76 | 1.64× | 770 MB | 12.05 GB | 692 |
+
+Closest-hit gets *more* efficient as `N` grows (occupancy). Memory stays ~linear
+in `N` and ~`n_meshes×` smaller than legacy. Lidar vs camera depth still matches
+in the mean (`~6e-7`); at `N=1024` a few pixels miss `atol=1e-4` (max `3.33`) —
+likely a grazing/tie difference, not a batch-wide drift.
+
 `raycast_fused(..., closest_hit=True)` is the new default. Keep
 `closest_hit=False` until a later round deletes the 3D kernels.
 
