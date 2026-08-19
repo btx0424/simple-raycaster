@@ -292,11 +292,11 @@ def main() -> None:
     parser.add_argument("--merge-static", action="store_true", help="Concatenate ground+cube into one mesh")
     parser.add_argument("--robot-first", action="store_true", help="Query G1 body meshes before ground/cube")
     parser.add_argument("--cube-first", action="store_true", help="Query the nearby cube before the ground plane")
-    parser.add_argument("--block-dim", type=int, default=256, help="CUDA threads per block for closest-hit kernel")
+    parser.add_argument("--block-dim", type=int, default=128, help="CUDA threads per block for closest-hit kernel")
     parser.add_argument(
         "--sweep-block-dim",
         action="store_true",
-        help="Time closest-hit at block_dim in {64,128,256,512}",
+        help="Time closest-hit at block_dim in {32,64,128,256,512}",
     )
     parser.add_argument(
         "--simplify",
@@ -512,7 +512,7 @@ def main() -> None:
 
     if args.sweep_block_dim:
         saved = raycaster.block_dim
-        for bd in (64, 128, 256, 512):
+        for bd in (32, 64, 128, 256, 512):
             if bd == saved:
                 continue
             raycaster.block_dim = bd
@@ -589,6 +589,7 @@ def main() -> None:
                 ],
                 device=raycaster.device,
                 record_tape=False,
+                block_dim=raycaster.block_dim,
             )
             return prox_pos_cache, prox_dist_cache
 

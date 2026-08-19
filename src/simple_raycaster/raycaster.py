@@ -56,7 +56,7 @@ class MultiMeshRaycaster:
         self._work: dict = {}
         self._graph = None
         self._graph_key = None
-        self.block_dim = 256
+        self.block_dim = 128
     
     def initialize(self):
         if self.initialized:

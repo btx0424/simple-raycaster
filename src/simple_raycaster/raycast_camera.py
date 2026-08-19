@@ -27,7 +27,7 @@ import torch
 import trimesh
 import warp as wp
 
-from .helpers import trimesh2wp
+from .helpers import trimesh2wp, workspace_tensor
 from .kernels import raycast_camera_kernel
 
 DepthMode = Literal["planar", "ray"]
@@ -115,6 +115,8 @@ class RaycastCamera:
         self._pose_body_ids: torch.Tensor | None = None
         self.bvh_constructor: str | None = None
         self.bvh_leaf_size: int | None = None
+        self.block_dim = 128
+        self._work: dict = {}
 
     @property
     def n_meshes(self) -> int:
@@ -294,7 +296,11 @@ class RaycastCamera:
         enabled: torch.Tensor | None = None,
         mesh_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Render mesh RGB-D → ``rgb[N,H,W,3]``, ``depth[N,H,W]``, ``mask[N,H,W]``."""
+        """Render mesh RGB-D → ``rgb[N,H,W,3]``, ``depth[N,H,W]``, ``mask[N,H,W]``.
+
+        Output buffers are reused across calls with the same ``N`` and resolution
+        (overwritten on the next ``render``).
+        """
         del enabled
         if mesh_indices is not None:
             raise NotImplementedError(
@@ -335,9 +341,9 @@ class RaycastCamera:
         else:
             light = torch.tensor(light_dir, device=self.torch_device, dtype=torch.float32)
 
-        rgb_flat = torch.empty(n, p, 3, device=self.torch_device, dtype=torch.float32)
-        depth_flat = torch.empty(n, p, device=self.torch_device, dtype=torch.float32)
-        mask_flat = torch.empty(n, p, device=self.torch_device, dtype=torch.bool)
+        rgb_flat = workspace_tensor(self._work, "rgb", (n, p, 3), torch.float32, self.torch_device)
+        depth_flat = workspace_tensor(self._work, "depth", (n, p), torch.float32, self.torch_device)
+        mask_flat = workspace_tensor(self._work, "mask", (n, p), torch.bool, self.torch_device)
 
         wp.launch(
             raycast_camera_kernel,
@@ -370,9 +376,11 @@ class RaycastCamera:
             ],
             device=self.device,
             record_tape=False,
+            block_dim=self.block_dim,
         )
 
-        rgb = rgb_flat.view(n, h, w, 3).clamp(0.0, 1.0)
+        rgb = rgb_flat.view(n, h, w, 3)
+        rgb.clamp_(0.0, 1.0)
         depth = depth_flat.view(n, h, w)
         mask = mask_flat.view(n, h, w)
         return rgb, depth, mask

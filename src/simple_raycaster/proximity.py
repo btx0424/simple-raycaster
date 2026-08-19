@@ -148,6 +148,7 @@ class MeshProximitySensor:
                     ],
                     device=self.device,
                     record_tape=False,
+                    block_dim=self._meshes.block_dim,
                 )
             else:
                 assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
@@ -172,6 +173,7 @@ class MeshProximitySensor:
                     ],
                     device=self.device,
                     record_tape=False,
+                    block_dim=self._meshes.block_dim,
                 )
             return closest_pos_w, distances
 

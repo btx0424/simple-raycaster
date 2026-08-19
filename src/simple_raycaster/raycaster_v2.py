@@ -50,7 +50,7 @@ class MultiMeshRaycasterV2:
         self.bvh_leaf_size = bvh_leaf_size
         self.initialized = False
         self._work: dict = {}
-        self.block_dim = 256
+        self.block_dim = 128
     
     def initialize(self):
         if self.initialized:
