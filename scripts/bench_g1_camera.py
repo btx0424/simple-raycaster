@@ -23,6 +23,10 @@ from scipy.spatial.transform import Rotation
 
 from simple_raycaster import MultiMeshRaycaster, RaycastCamera
 from simple_raycaster.helpers import quat_rotate
+from simple_raycaster.kernels import (
+    transform_and_query_point_closest_kernel,
+    transform_and_query_point_kernel,
+)
 
 DEFAULT_G1_XML = (
     "/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/"
@@ -123,6 +127,8 @@ def load_scene(
     *,
     bvh_constructor: str | None = None,
     merge_static: bool = False,
+    robot_first: bool = False,
+    simplify_factor: float = 0.0,
 ) -> tuple[MultiMeshRaycaster, torch.Tensor, torch.Tensor, dict]:
     xml_path = str(Path(xml_path).resolve())
     model = mujoco.MjModel.from_xml_path(xml_path)
@@ -134,7 +140,7 @@ def load_scene(
         body_names,
         model,
         device=device,
-        simplify_factor=0.0,
+        simplify_factor=simplify_factor,
         bvh_constructor=bvh_constructor,
     )
     mesh_names = list(g1.mesh_names or [])
@@ -160,8 +166,12 @@ def load_scene(
         static_meshes = [trimesh.util.concatenate(static_meshes)]
     n_static = len(static_meshes)
 
+    if robot_first:
+        meshes = [*g1.meshes_wp, *static_meshes]
+    else:
+        meshes = [*static_meshes, *g1.meshes_wp]
     raycaster = MultiMeshRaycaster(
-        [*static_meshes, *g1.meshes_wp],
+        meshes,
         device=device,
         bvh_constructor=bvh_constructor,
     )
@@ -174,6 +184,8 @@ def load_scene(
         "g1_names": mesh_names,
         "bvh_constructor": bvh_constructor or "default(lbvh)",
         "merge_static": merge_static,
+        "robot_first": robot_first,
+        "simplify_factor": simplify_factor,
     }
     return raycaster, g1_pos, g1_quat, stats | {"n_static": n_static}
 
@@ -183,13 +195,21 @@ def expand_poses(
     g1_pos: torch.Tensor,
     g1_quat: torch.Tensor,
     n_static: int,
+    *,
+    robot_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = g1_pos.device
     ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device, dtype=torch.float32)
     static_pos = torch.zeros(n, n_static, 3, device=device, dtype=torch.float32)
     static_quat = ident.view(1, 1, 4).expand(n, n_static, 4).contiguous()
-    mesh_pos = torch.cat([static_pos, g1_pos.unsqueeze(0).expand(n, -1, -1)], dim=1)
-    mesh_quat = torch.cat([static_quat, g1_quat.unsqueeze(0).expand(n, -1, -1)], dim=1)
+    g1_pos_b = g1_pos.unsqueeze(0).expand(n, -1, -1)
+    g1_quat_b = g1_quat.unsqueeze(0).expand(n, -1, -1)
+    if robot_first:
+        mesh_pos = torch.cat([g1_pos_b, static_pos], dim=1)
+        mesh_quat = torch.cat([g1_quat_b, static_quat], dim=1)
+    else:
+        mesh_pos = torch.cat([static_pos, g1_pos_b], dim=1)
+        mesh_quat = torch.cat([static_quat, g1_quat_b], dim=1)
     return mesh_pos.contiguous(), mesh_quat.contiguous()
 
 
@@ -266,7 +286,16 @@ def main() -> None:
         help="Rebuild the scene for sah/median/lbvh and time closest-hit only",
     )
     parser.add_argument("--merge-static", action="store_true", help="Concatenate ground+cube into one mesh")
+    parser.add_argument("--robot-first", action="store_true", help="Query G1 body meshes before ground/cube")
+    parser.add_argument(
+        "--simplify",
+        type=float,
+        default=0.0,
+        help="Quadric decimation factor for G1 bodies (0 = none)",
+    )
     parser.add_argument("--graph", action="store_true", help="Also bench CUDA graph replay of fused closest-hit")
+    parser.add_argument("--proximity", action="store_true", help="Also bench fused closest-point vs per-mesh argmin")
+    parser.add_argument("--n-probes", type=int, default=256, help="Probe points per env for --proximity")
     parser.add_argument("--json-out", type=str, default="")
     args = parser.parse_args()
 
@@ -281,9 +310,13 @@ def main() -> None:
         device,
         bvh_constructor=args.bvh,
         merge_static=args.merge_static,
+        robot_first=args.robot_first,
+        simplify_factor=args.simplify,
     )
     n_static = stats["n_static"]
-    mesh_pos, mesh_quat = expand_poses(args.n, g1_pos, g1_quat, n_static)
+    mesh_pos, mesh_quat = expand_poses(
+        args.n, g1_pos, g1_quat, n_static, robot_first=args.robot_first
+    )
 
     cam_pos_np, cam_quat_np = sample_cameras(
         args.n,
@@ -308,7 +341,8 @@ def main() -> None:
         f"verts {stats['n_points']}  faces {stats['n_faces']}"
     )
     print(f"N={args.n}  {args.width}x{args.height} ({n_rays} rays)  fov={args.fov}  max_dist={args.max_dist}")
-    print(f"bvh={stats['bvh_constructor']}  merge_static={stats['merge_static']}")
+    print(f"bvh={stats['bvh_constructor']}  merge_static={stats['merge_static']}  "
+          f"robot_first={stats['robot_first']}  simplify={stats['simplify_factor']}")
     print(raycaster)
 
     kwargs = dict(
@@ -338,6 +372,18 @@ def main() -> None:
                 check_parity(nrm_old, nrm_new, "normal legacy vs closest", 1e-4),
             ]
         )
+        mesh_idx = torch.arange(raycaster.n_meshes, device=torch_device).expand(args.n, -1)
+        pos_sub, dist_sub, nrm_sub = raycaster.raycast_fused(
+            **kwargs, closest_hit=True, mesh_indices=mesh_idx
+        )
+        parity_rows.extend(
+            [
+                check_parity(dist_new, dist_sub, "dist closest vs mesh_indices", 1e-5),
+                check_parity(pos_new, pos_sub, "pos closest vs mesh_indices", 1e-5),
+                check_parity(nrm_new, nrm_sub, "normal closest vs mesh_indices", 1e-4),
+            ]
+        )
+        del pos_sub, dist_sub, nrm_sub, mesh_idx
     if not args.skip_unfused:
         pos_u, dist_u, nrm_u = raycaster.raycast(**kwargs)
         parity_rows.extend(
@@ -428,9 +474,13 @@ def main() -> None:
                 device,
                 bvh_constructor=ctor,
                 merge_static=args.merge_static,
+                robot_first=args.robot_first,
+                simplify_factor=args.simplify,
             )
             print(f"  {rc}")
-            mp, mq = expand_poses(args.n, gp, gq, st["n_static"])
+            mp, mq = expand_poses(
+                args.n, gp, gq, st["n_static"], robot_first=args.robot_first
+            )
             kw = dict(
                 mesh_pos_w=mp,
                 mesh_quat_w=mq,
@@ -443,6 +493,92 @@ def main() -> None:
                 f"lidar_fused_bvh_{ctor}",
                 lambda rc=rc, kw=kw: rc.raycast_fused(**kw, closest_hit=True),
             )
+
+    if args.proximity:
+        if not raycaster.initialized:
+            raycaster.initialize()
+        rng = torch.Generator(device=torch_device)
+        rng.manual_seed(args.seed)
+        probes = torch.randn(args.n, args.n_probes, 3, device=torch_device, generator=rng)
+        probes = probes * 0.6 + torch.tensor([0.0, 0.0, 0.4], device=torch_device)
+        enabled = torch.ones(args.n, dtype=torch.bool, device=torch_device)
+        prox_max = 2.0
+
+        def launch_prox_legacy():
+            closest = torch.empty(
+                args.n, raycaster.n_meshes, args.n_probes, 3,
+                device=torch_device, dtype=torch.float32,
+            )
+            dist = torch.empty(
+                args.n, raycaster.n_meshes, args.n_probes,
+                device=torch_device, dtype=torch.float32,
+            )
+            wp.launch(
+                transform_and_query_point_kernel,
+                dim=(args.n, raycaster.n_meshes, args.n_probes),
+                inputs=[
+                    raycaster.meshes_array,
+                    wp.from_torch(mesh_pos, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(mesh_quat, dtype=wp.vec4, return_ctype=True),
+                    wp.from_torch(probes, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                    prox_max,
+                    0,
+                ],
+                outputs=[
+                    wp.from_torch(closest, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(dist, dtype=wp.float32, return_ctype=True),
+                ],
+                device=raycaster.device,
+                record_tape=False,
+            )
+            idx = dist.argmin(dim=1)
+            gather = idx.unsqueeze(1)
+            return (
+                closest.gather(1, gather.unsqueeze(-1).expand(-1, 1, -1, 3)).squeeze(1),
+                dist.gather(1, gather).squeeze(1),
+            )
+
+        prox_pos_cache = torch.empty(args.n, args.n_probes, 3, device=torch_device)
+        prox_dist_cache = torch.empty(args.n, args.n_probes, device=torch_device)
+
+        def launch_prox_closest():
+            wp.launch(
+                transform_and_query_point_closest_kernel,
+                dim=(args.n, args.n_probes),
+                inputs=[
+                    raycaster.meshes_array,
+                    wp.from_torch(mesh_pos, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(mesh_quat, dtype=wp.vec4, return_ctype=True),
+                    wp.from_torch(probes, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                    prox_max,
+                    0,
+                ],
+                outputs=[
+                    wp.from_torch(prox_pos_cache, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(prox_dist_cache, dtype=wp.float32, return_ctype=True),
+                ],
+                device=raycaster.device,
+                record_tape=False,
+            )
+            return prox_pos_cache, prox_dist_cache
+
+        print("\nProximity parity (one shot)...")
+        pos_pl, dist_pl = launch_prox_legacy()
+        pos_pc, dist_pc = launch_prox_closest()
+        for row in (
+            check_parity(dist_pl, dist_pc, "prox dist legacy vs closest", 1e-5),
+            check_parity(pos_pl, pos_pc, "prox pos legacy vs closest", 1e-5),
+        ):
+            mark = "ok" if row["ok"] else "FAIL"
+            print(f"  [{mark}] {row['name']}: max={row['max_abs']:.3e} mean={row['mean_abs']:.3e}")
+            parity_rows.append(row)
+        del pos_pl, dist_pl, pos_pc, dist_pc
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize(torch_device)
+        add_result("proximity_closest", launch_prox_closest)
+        add_result("proximity_legacy", launch_prox_legacy)
 
     print("\n" + "=" * 70)
     print("RESULTS")
@@ -466,7 +602,16 @@ def main() -> None:
         "hit_frac": hit_frac,
         "scene": {
             k: stats[k]
-            for k in ("n_meshes", "n_points", "n_faces", "n_g1_bodies", "bvh_constructor", "merge_static")
+            for k in (
+                "n_meshes",
+                "n_points",
+                "n_faces",
+                "n_g1_bodies",
+                "bvh_constructor",
+                "merge_static",
+                "robot_first",
+                "simplify_factor",
+            )
         },
         "parity": parity_rows,
         "results": results,

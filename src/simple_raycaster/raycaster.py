@@ -85,6 +85,7 @@ class MultiMeshRaycaster:
         max_dist: float,
         hit_distances: torch.Tensor,
         hit_normals: torch.Tensor,
+        hit_positions: torch.Tensor,
         mesh_indices: torch.Tensor | None,
     ) -> None:
         n, n_rays = ray_dirs_w.shape[:2]
@@ -110,6 +111,7 @@ class MultiMeshRaycaster:
                 outputs=[
                     wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
                     wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(hit_positions, dtype=wp.vec3, return_ctype=True),
                 ],
                 device=self.device,
                 record_tape=False,
@@ -135,6 +137,7 @@ class MultiMeshRaycaster:
                 outputs=[
                     wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
                     wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(hit_positions, dtype=wp.vec3, return_ctype=True),
                 ],
                 device=self.device,
                 record_tape=False,
@@ -167,16 +170,17 @@ class MultiMeshRaycaster:
             enabled = enabled.reshape(n)
         hit_distances = self._cached("closest_dist", (n, n_rays), torch.float32, device)
         hit_normals = self._cached("closest_nrm", (n, n_rays, 3), torch.float32, device)
+        hit_positions = self._cached("closest_pos", (n, n_rays, 3), torch.float32, device)
         self._launch_closest_hit(
             mesh_pos_w, mesh_quat_w, ray_starts_w, ray_dirs_w, enabled,
-            min_dist, max_dist, hit_distances, hit_normals, mesh_indices,
+            min_dist, max_dist, hit_distances, hit_normals, hit_positions, mesh_indices,
         )
         torch.cuda.synchronize(device)
         wp.synchronize()
         with wp.ScopedCapture(device=self.device, force_module_load=False) as cap:
             self._launch_closest_hit(
                 mesh_pos_w, mesh_quat_w, ray_starts_w, ray_dirs_w, enabled,
-                min_dist, max_dist, hit_distances, hit_normals, mesh_indices,
+                min_dist, max_dist, hit_distances, hit_normals, hit_positions, mesh_indices,
             )
         self._graph = cap.graph
         self._graph_key = (
@@ -508,9 +512,10 @@ class MultiMeshRaycaster:
               `mesh_quat_w` should match `mesh_indices.shape[1]`, not necessarily `n_meshes`.
             - Quaternions are converted from WXYZ to XYZW format internally for Warp compatibility.
             - All input tensors must be on the same device as the raycaster.
-            - ``closest_hit=True`` (default) loops meshes in-kernel and writes
-              ``[N, n_rays]`` directly. Output buffers are reused across calls
-              with the same shape (valid until the next call).
+            - ``closest_hit=True`` (default) loops meshes in-kernel, shrinks
+              ``mesh_query_ray`` tmax to the current closest hit, and writes
+              distances, normals, and positions into reused ``[N, n_rays]``
+              buffers (valid until the next call).
               ``closest_hit=False`` keeps the older per-mesh buffer plus PyTorch
               ``min`` (parity / baseline).
             - ``use_graph=True`` replays a graph from :meth:`capture_fused`.
@@ -545,6 +550,9 @@ class MultiMeshRaycaster:
             hit_normals = self._cached(
                 "closest_nrm", (N, n_rays, 3), torch.float32, ray_starts_w.device
             )
+            hit_positions = self._cached(
+                "closest_pos", (N, n_rays, 3), torch.float32, ray_starts_w.device
+            )
             if use_graph:
                 if self._graph is None:
                     raise RuntimeError("use_graph=True requires capture_fused() first")
@@ -560,13 +568,9 @@ class MultiMeshRaycaster:
                     max_dist,
                     hit_distances,
                     hit_normals,
+                    hit_positions,
                     mesh_indices,
                 )
-            hit_positions = self._cached(
-                "closest_pos", (N, n_rays, 3), torch.float32, ray_starts_w.device
-            )
-            torch.mul(ray_dirs_w, hit_distances.unsqueeze(-1), out=hit_positions)
-            hit_positions.add_(ray_starts_w)
             return hit_positions, hit_distances, hit_normals
 
         if mesh_indices is None:

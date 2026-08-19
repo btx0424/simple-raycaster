@@ -181,17 +181,19 @@ def transform_and_raycast_closest_kernel(
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=2),
     hit_normals: wp.array(dtype=wp.vec3, ndim=2),
+    hit_positions: wp.array(dtype=wp.vec3, ndim=2),
 ):
     """Fused world→mesh transform + closest-hit raycast. Writes ``[N, n_rays]``."""
     i, ray_id = wp.tid()
+    ray_start_w = ray_starts_w[i, ray_id]
+    ray_dir_w = ray_dirs_w[i, ray_id]
     if not enabled[i]:
         hit_distances[i, ray_id] = wp.INF
         hit_normals[i, ray_id] = wp.vec3(0.0, 0.0, 0.0)
+        hit_positions[i, ray_id] = ray_start_w + ray_dir_w * wp.INF
         return
 
     n_meshes = int(mesh_pos_w.shape[1])
-    ray_start_w = ray_starts_w[i, ray_id]
-    ray_dir_w = ray_dirs_w[i, ray_id]
     best_t = float(max_dist)
     best_n = wp.vec3(0.0, 0.0, 0.0)
 
@@ -200,13 +202,14 @@ def transform_and_raycast_closest_kernel(
         quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
         ray_start_b = wp.quat_rotate_inv(quat_xyzw, ray_start_w - mesh_pos_w[i, m])
         ray_dir_b = wp.quat_rotate_inv(quat_xyzw, ray_dir_w)
-        result = wp.mesh_query_ray(meshes[m], ray_start_b, ray_dir_b, max_dist)
+        result = wp.mesh_query_ray(meshes[m], ray_start_b, ray_dir_b, best_t)
         if result.result and result.t >= min_dist and result.t < best_t:
             best_t = result.t
             best_n = wp.quat_rotate(quat_xyzw, result.normal)
 
     hit_distances[i, ray_id] = best_t
     hit_normals[i, ray_id] = best_n
+    hit_positions[i, ray_id] = ray_start_w + ray_dir_w * best_t
 
 
 @wp.kernel(enable_backward=False)
@@ -222,17 +225,19 @@ def transform_and_raycast_closest_against_meshes_kernel(
     max_dist: float,
     hit_distances: wp.array(dtype=wp.float32, ndim=2),
     hit_normals: wp.array(dtype=wp.vec3, ndim=2),
+    hit_positions: wp.array(dtype=wp.vec3, ndim=2),
 ):
     """Closest-hit fused raycast against a per-batch mesh subset."""
     i, ray_id = wp.tid()
+    ray_start_w = ray_starts_w[i, ray_id]
+    ray_dir_w = ray_dirs_w[i, ray_id]
     if not enabled[i]:
         hit_distances[i, ray_id] = wp.INF
         hit_normals[i, ray_id] = wp.vec3(0.0, 0.0, 0.0)
+        hit_positions[i, ray_id] = ray_start_w + ray_dir_w * wp.INF
         return
 
     n_subset = int(mesh_indices.shape[1])
-    ray_start_w = ray_starts_w[i, ray_id]
-    ray_dir_w = ray_dirs_w[i, ray_id]
     best_t = float(max_dist)
     best_n = wp.vec3(0.0, 0.0, 0.0)
 
@@ -242,13 +247,14 @@ def transform_and_raycast_closest_against_meshes_kernel(
         quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
         ray_start_b = wp.quat_rotate_inv(quat_xyzw, ray_start_w - mesh_pos_w[i, j])
         ray_dir_b = wp.quat_rotate_inv(quat_xyzw, ray_dir_w)
-        result = wp.mesh_query_ray(meshes[mesh_id], ray_start_b, ray_dir_b, max_dist)
+        result = wp.mesh_query_ray(meshes[mesh_id], ray_start_b, ray_dir_b, best_t)
         if result.result and result.t >= min_dist and result.t < best_t:
             best_t = result.t
             best_n = wp.quat_rotate(quat_xyzw, result.normal)
 
     hit_distances[i, ray_id] = best_t
     hit_normals[i, ray_id] = best_n
+    hit_positions[i, ray_id] = ray_start_w + ray_dir_w * best_t
 
 
 @wp.func
@@ -371,7 +377,7 @@ def raycast_camera_kernel(
         mpos = mesh_pos_w[n, m]
         ray_o_b = wp.quat_rotate_inv(mq_xyzw, origin - mpos)
         ray_d_b = wp.quat_rotate_inv(mq_xyzw, dir_w)
-        result = wp.mesh_query_ray(meshes[m], ray_o_b, ray_d_b, far)
+        result = wp.mesh_query_ray(meshes[m], ray_o_b, ray_d_b, best_t)
         if result.result and result.t >= near and result.t < best_t:
             best_t = result.t
             best_n = wp.quat_rotate(mq_xyzw, result.normal)
@@ -432,3 +438,89 @@ def transform_and_query_point_against_meshes_kernel(
     else:
         closest_pos_w[i, j, point_id] = point_w
         distances[i, j, point_id] = max_dist
+
+
+@wp.kernel(enable_backward=False)
+def transform_and_query_point_closest_kernel(
+    meshes: wp.array(dtype=wp.uint64),
+    mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),
+    points_w: wp.array(dtype=wp.vec3, ndim=2),
+    enabled: wp.array(dtype=wp.bool, ndim=1),
+    max_dist: float,
+    sign_mode: int,
+    closest_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    distances: wp.array(dtype=wp.float32, ndim=2),
+):
+    """Closest-point query looping meshes in-kernel. Writes ``[N, n_points]``."""
+    i, point_id = wp.tid()
+    point_w = points_w[i, point_id]
+    if not enabled[i]:
+        distances[i, point_id] = wp.INF
+        closest_pos_w[i, point_id] = point_w
+        return
+
+    n_meshes = int(mesh_pos_w.shape[1])
+    best_abs = float(max_dist)
+    best_dist = float(max_dist)
+    best_pos = point_w
+
+    for m in range(n_meshes):
+        quat_wxyz = mesh_quat_w[i, m]
+        quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
+        point_b = wp.quat_rotate_inv(quat_xyzw, point_w - mesh_pos_w[i, m])
+        found, closest_b, dist = _query_closest_point(meshes[m], point_b, best_abs, sign_mode)
+        if found:
+            cand_abs = wp.abs(dist)
+            if cand_abs < best_abs:
+                best_abs = cand_abs
+                best_dist = dist
+                best_pos = mesh_pos_w[i, m] + wp.quat_rotate(quat_xyzw, closest_b)
+
+    distances[i, point_id] = best_dist
+    closest_pos_w[i, point_id] = best_pos
+
+
+@wp.kernel(enable_backward=False)
+def transform_and_query_point_closest_against_meshes_kernel(
+    meshes: wp.array(dtype=wp.uint64),
+    mesh_indices: wp.array(dtype=wp.int64, ndim=2),
+    mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),
+    points_w: wp.array(dtype=wp.vec3, ndim=2),
+    enabled: wp.array(dtype=wp.bool, ndim=1),
+    max_dist: float,
+    sign_mode: int,
+    closest_pos_w: wp.array(dtype=wp.vec3, ndim=2),
+    distances: wp.array(dtype=wp.float32, ndim=2),
+):
+    """Closest-point query against a per-batch mesh subset. Writes ``[N, n_points]``."""
+    i, point_id = wp.tid()
+    point_w = points_w[i, point_id]
+    if not enabled[i]:
+        distances[i, point_id] = wp.INF
+        closest_pos_w[i, point_id] = point_w
+        return
+
+    n_subset = int(mesh_indices.shape[1])
+    best_abs = float(max_dist)
+    best_dist = float(max_dist)
+    best_pos = point_w
+
+    for j in range(n_subset):
+        mesh_id = int(mesh_indices[i, j])
+        quat_wxyz = mesh_quat_w[i, j]
+        quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
+        point_b = wp.quat_rotate_inv(quat_xyzw, point_w - mesh_pos_w[i, j])
+        found, closest_b, dist = _query_closest_point(
+            meshes[mesh_id], point_b, best_abs, sign_mode
+        )
+        if found:
+            cand_abs = wp.abs(dist)
+            if cand_abs < best_abs:
+                best_abs = cand_abs
+                best_dist = dist
+                best_pos = mesh_pos_w[i, j] + wp.quat_rotate(quat_xyzw, closest_b)
+
+    distances[i, point_id] = best_dist
+    closest_pos_w[i, point_id] = best_pos

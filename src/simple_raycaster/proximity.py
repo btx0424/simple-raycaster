@@ -8,6 +8,8 @@ from jaxtyping import Bool, Float, Int
 
 from .kernels import (
     transform_and_query_point_against_meshes_kernel,
+    transform_and_query_point_closest_against_meshes_kernel,
+    transform_and_query_point_closest_kernel,
     transform_and_query_point_kernel,
 )
 from .raycaster_v2 import MultiMeshRaycasterV2
@@ -77,6 +79,7 @@ class MeshProximitySensor:
         enabled: Optional[Bool[torch.Tensor, "N"]] = None,
         mesh_indices: Optional[Int[torch.Tensor, "N n_meshes"]] = None,
         signed: bool = False,
+        closest_hit: bool = True,
     ) -> tuple[
         Float[torch.Tensor, "N n_points 3"],
         Float[torch.Tensor, "N n_points"],
@@ -97,6 +100,10 @@ class MeshProximitySensor:
             mesh_indices: Optional per-batch mesh subset. Shape ``[N, n_subset]``.
             signed: If True, use ``mesh_query_point_sign_normal``; else unsigned
                 ``mesh_query_point_no_sign``.
+            closest_hit: If True (default), loop meshes in-kernel and write
+                ``[N, n_points]``. Output buffers are reused across calls with
+                the same shape. If False, write a per-mesh buffer and reduce
+                with PyTorch ``argmin`` (parity / baseline).
 
         Returns:
             ``(closest_pos_w, distances)`` with shapes ``[N, n_points, 3]`` and
@@ -109,11 +116,64 @@ class MeshProximitySensor:
         mesh_pos_w, mesh_quat_w = self._meshes._get_mesh_poses_w(N, positions_w.device)
 
         if enabled is None:
-            enabled = torch.ones(N, dtype=torch.bool, device=positions_w.device)
+            enabled = self._meshes._default_enabled(N, positions_w.device)
         else:
             enabled = enabled.reshape(N)
 
         sign_flag = 1 if signed else 0
+
+        if closest_hit:
+            closest_pos_w = self._meshes._cached(
+                "prox_pos", (N, n_points, 3), torch.float32, positions_w.device
+            )
+            distances = self._meshes._cached(
+                "prox_dist", (N, n_points), torch.float32, positions_w.device
+            )
+            if mesh_indices is None:
+                wp.launch(
+                    transform_and_query_point_closest_kernel,
+                    dim=(N, n_points),
+                    inputs=[
+                        self._meshes.meshes_array,
+                        wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
+                        wp.from_torch(positions_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                        max_dist,
+                        sign_flag,
+                    ],
+                    outputs=[
+                        wp.from_torch(closest_pos_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(distances, dtype=wp.float32, return_ctype=True),
+                    ],
+                    device=self.device,
+                    record_tape=False,
+                )
+            else:
+                assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
+                    "`mesh_indices` must have the same number of meshes as the registered mesh poses"
+                )
+                wp.launch(
+                    transform_and_query_point_closest_against_meshes_kernel,
+                    dim=(N, n_points),
+                    inputs=[
+                        self._meshes.meshes_array,
+                        wp.from_torch(mesh_indices, dtype=wp.int64, return_ctype=True),
+                        wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
+                        wp.from_torch(positions_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                        max_dist,
+                        sign_flag,
+                    ],
+                    outputs=[
+                        wp.from_torch(closest_pos_w, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(distances, dtype=wp.float32, return_ctype=True),
+                    ],
+                    device=self.device,
+                    record_tape=False,
+                )
+            return closest_pos_w, distances
 
         if mesh_indices is None:
             result_shape = (N, self.n_meshes, n_points)

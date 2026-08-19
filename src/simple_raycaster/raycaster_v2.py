@@ -423,6 +423,9 @@ class MultiMeshRaycasterV2:
             hit_normals = self._cached(
                 "closest_nrm", (N, n_rays, 3), torch.float32, ray_starts_w.device
             )
+            hit_positions = self._cached(
+                "closest_pos", (N, n_rays, 3), torch.float32, ray_starts_w.device
+            )
             if mesh_indices is None:
                 wp.launch(
                     transform_and_raycast_closest_kernel,
@@ -440,6 +443,7 @@ class MultiMeshRaycasterV2:
                     outputs=[
                         wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
                         wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(hit_positions, dtype=wp.vec3, return_ctype=True),
                     ],
                     device=self.device,
                     record_tape=False,
@@ -465,15 +469,11 @@ class MultiMeshRaycasterV2:
                     outputs=[
                         wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
                         wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                        wp.from_torch(hit_positions, dtype=wp.vec3, return_ctype=True),
                     ],
                     device=self.device,
                     record_tape=False,
                 )
-            hit_positions = self._cached(
-                "closest_pos", (N, n_rays, 3), torch.float32, ray_starts_w.device
-            )
-            torch.mul(ray_dirs_w, hit_distances.unsqueeze(-1), out=hit_positions)
-            hit_positions.add_(ray_starts_w)
             return hit_positions, hit_distances, hit_normals
 
         if mesh_indices is None:
