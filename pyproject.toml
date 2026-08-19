@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simple-raycaster"
-version = "0.2.0"
+version = "0.2.1"
 description = "A simple raycaster based on warp. Supports multiple and dynamic meshes."
 authors = [
     { name="Botian Xu", email="botianxu@gmail.com" }
@@ -12,18 +12,26 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "trimesh",
-    "warp-lang < 1.13",
+    # Floor only. Do not upper-bound within 1.x — host stacks pin Warp:
+    #   Isaac Sim 5.1 / Lab 2  → warp-lang < 1.13  (1.12.x)
+    #   mjlab                  → warp-lang ~= 1.14
+    #   Isaac Sim 6 / Lab 3    → warp-lang == 1.16
+    # An upper bound like <1.13 makes this package uninstallable on Lab 3 / mjlab.
+    # Kernels use the public warp API (mesh_query_ray, from_torch return_ctype)
+    # which is stable across 1.7–1.16. Cap at 2 in case Warp 2 breaks mesh queries.
+    "warp-lang>=1.7,<2",
     "fast_simplification",
     "torch",
     "mujoco",
     "tqdm",
-    "pyglet<2",
     "scipy",
     "jaxtyping"
 ]
 
 [project.optional-dependencies]
 diffrast = ["nvdiffrast"]
+# trimesh.Scene.show() in scripts/. Keep out of core: Isaac / nicegui stacks use pyglet 2.
+viz = ["pyglet<2"]
 
 [project.urls]
 "Source Code" = "https://github.com/btx0424/simple-raycaster"

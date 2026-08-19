@@ -34,6 +34,8 @@ cd simple-raycaster
 pip install -e .
 ```
 
+`simple-raycaster` depends on `warp-lang>=1.7,<2` with **no 1.x upper bound**. Pin Warp in the host environment (Isaac Sim 5.1: `<1.13`, mjlab: `~=1.14`, Isaac Sim 6: `==1.16`), not here.
+
 Initialize Warp once before raycasting:
 
 ```python
