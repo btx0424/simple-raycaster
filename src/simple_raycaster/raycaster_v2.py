@@ -6,7 +6,7 @@ import warp as wp
 
 from typing import Optional, List, Union, TYPE_CHECKING
 from jaxtyping import Float, Bool, Int
-from .helpers import quat_rotate, quat_rotate_inverse, trimesh2wp
+from .helpers import quat_rotate, quat_rotate_inverse, trimesh2wp, workspace_tensor
 from .kernels import (
     raycast_kernel,
     raycast_against_meshes_kernel,
@@ -34,13 +34,22 @@ class MultiMeshRaycasterV2:
     TODO: add support for backends other than isaac.
 
     """
-    def __init__(self, device: str | torch.device):
+    def __init__(
+        self,
+        device: str | torch.device,
+        *,
+        bvh_constructor: str | None = None,
+        bvh_leaf_size: int | None = None,
+    ):
         self.entities: List[Optional[IsaacEntity]] = []
         self.meshes_wp = []
         if not isinstance(device, str):
             device = wp.get_device(str(device))
         self.device = device
+        self.bvh_constructor = bvh_constructor
+        self.bvh_leaf_size = bvh_leaf_size
         self.initialized = False
+        self._work: dict = {}
     
     def initialize(self):
         if self.initialized:
@@ -49,10 +58,25 @@ class MultiMeshRaycasterV2:
         self.initialized = True
         self.meshes_array = wp.array([mesh_wp.id for mesh_wp in self.meshes_wp], device=self.device, dtype=wp.uint64)
 
+    def _cached(self, key: str, shape: tuple, dtype: torch.dtype, device) -> torch.Tensor:
+        return workspace_tensor(self._work, key, shape, dtype, device)
+
+    def _default_enabled(self, n: int, device) -> torch.Tensor:
+        prev = self._work.get("enabled_true")
+        enabled = self._cached("enabled_true", (n,), torch.bool, device)
+        if prev is None or prev is not enabled:
+            enabled.fill_(True)
+        return enabled
+
     def _add_mesh(self, mesh: MeshType):
         """Add a mesh to the raycaster (internal)."""
         if isinstance(mesh, trimesh.Trimesh):
-            mesh = trimesh2wp(mesh, self.device)
+            mesh = trimesh2wp(
+                mesh,
+                self.device,
+                bvh_constructor=self.bvh_constructor,
+                bvh_leaf_size=self.bvh_leaf_size,
+            )
         self.meshes_wp.append(mesh)
         self.initialized = False
 
@@ -388,13 +412,17 @@ class MultiMeshRaycasterV2:
         mesh_pos_w, mesh_quat_w = self._get_mesh_poses_w(N, ray_starts_w.device)
 
         if enabled is None:
-            enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
+            enabled = self._default_enabled(N, ray_starts_w.device)
         else:
             enabled = enabled.reshape(N,)
 
         if closest_hit:
-            hit_distances = torch.empty((N, n_rays), device=ray_starts_w.device)
-            hit_normals = torch.empty(N, n_rays, 3, device=ray_starts_w.device)
+            hit_distances = self._cached(
+                "closest_dist", (N, n_rays), torch.float32, ray_starts_w.device
+            )
+            hit_normals = self._cached(
+                "closest_nrm", (N, n_rays, 3), torch.float32, ray_starts_w.device
+            )
             if mesh_indices is None:
                 wp.launch(
                     transform_and_raycast_closest_kernel,
@@ -441,7 +469,11 @@ class MultiMeshRaycasterV2:
                     device=self.device,
                     record_tape=False,
                 )
-            hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+            hit_positions = self._cached(
+                "closest_pos", (N, n_rays, 3), torch.float32, ray_starts_w.device
+            )
+            torch.mul(ray_dirs_w, hit_distances.unsqueeze(-1), out=hit_positions)
+            hit_positions.add_(ray_starts_w)
             return hit_positions, hit_distances, hit_normals
 
         if mesh_indices is None:

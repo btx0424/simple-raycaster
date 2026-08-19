@@ -113,6 +113,8 @@ class RaycastCamera:
 
         self._pose_entity: Any | None = None
         self._pose_body_ids: torch.Tensor | None = None
+        self.bvh_constructor: str | None = None
+        self.bvh_leaf_size: int | None = None
 
     @property
     def n_meshes(self) -> int:
@@ -150,7 +152,15 @@ class RaycastCamera:
                 )
             kept_ids = [int(x) for x in pose_body_ids]
 
-        self.meshes_wp = [trimesh2wp(m, self.device) for m in kept]
+        self.meshes_wp = [
+            trimesh2wp(
+                m,
+                self.device,
+                bvh_constructor=getattr(self, "bvh_constructor", None),
+                bvh_leaf_size=getattr(self, "bvh_leaf_size", None),
+            )
+            for m in kept
+        ]
         self.meshes_array = None
         self.initialized = False
         self._bound_raycaster = None

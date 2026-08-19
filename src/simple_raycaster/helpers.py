@@ -1,17 +1,66 @@
+import inspect
 import trimesh
 import warp as wp
 import numpy as np
 import torch
 
 
-def trimesh2wp(mesh: trimesh.Trimesh, device):
+_MESH_INIT_PARAMS = inspect.signature(wp.Mesh.__init__).parameters
+
+
+def trimesh2wp(
+    mesh: trimesh.Trimesh,
+    device,
+    *,
+    bvh_constructor: str | None = None,
+    bvh_leaf_size: int | None = None,
+):
+    """Convert a trimesh.Trimesh to ``wp.Mesh``.
+
+    ``bvh_constructor`` is ``"sah"``, ``"median"``, ``"lbvh"``, ``"cubql"``
+    (Warp ≥ 1.13), or ``None`` for Warp's device default (CUDA: ``lbvh``).
+    ``bvh_leaf_size`` is forwarded when the installed Warp supports it (1.9+).
     """
-    Convert a trimesh.Trimesh object to a wp.Mesh object.
-    """
+    kwargs = {}
+    if bvh_constructor is not None:
+        if "bvh_constructor" not in _MESH_INIT_PARAMS:
+            raise ValueError(
+                f"wp.Mesh does not accept bvh_constructor on Warp {wp.__version__}"
+            )
+        kwargs["bvh_constructor"] = bvh_constructor
+    if bvh_leaf_size is not None:
+        if "bvh_leaf_size" not in _MESH_INIT_PARAMS:
+            raise ValueError(
+                f"wp.Mesh does not accept bvh_leaf_size on Warp {wp.__version__}"
+            )
+        kwargs["bvh_leaf_size"] = int(bvh_leaf_size)
     return wp.Mesh(
         points=wp.array(mesh.vertices.astype(np.float32), dtype=wp.vec3, device=device),
         indices=wp.array(mesh.faces.astype(np.int32).flatten(), dtype=wp.int32, device=device),
+        **kwargs,
     )
+
+
+def workspace_tensor(
+    cache: dict,
+    key: str,
+    shape: tuple,
+    dtype: torch.dtype,
+    device,
+) -> torch.Tensor:
+    """Reuse a tensor in ``cache[key]`` when shape/dtype/device match."""
+    tensor = cache.get(key)
+    shape = tuple(shape)
+    device = torch.device(device)
+    if (
+        tensor is None
+        or tuple(tensor.shape) != shape
+        or tensor.dtype != dtype
+        or tensor.device != device
+    ):
+        tensor = torch.empty(shape, dtype=dtype, device=device)
+        cache[key] = tensor
+    return tensor
 
 
 def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:

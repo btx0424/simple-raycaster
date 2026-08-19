@@ -4,8 +4,10 @@ Working document for optimizing `simple-raycaster` on a realistic camera workloa
 This refines the original stub (test scene + Warp review + measure/iterate) using
 the current code, `AGENTS.md`, and the Warp 1.7–1.16 APIs we can actually use.
 
-**Status:** Round 1 done (in-kernel closest-hit). Next is Step 2 on this Warp 1.6
-venv (`bvh_constructor` sah/lbvh/median only — no cuBQL / `bvh_leaf_size`).
+**Status:** Round 2 done on Warp 1.6: BVH constructor sweep, fused buffer reuse,
+CUDA graph replay. Default BVH stays **lbvh**. Graphs help small N; at N=1024
+the kernel dominates. Next on this venv is limited (no cuBQL / `bvh_leaf_size` /
+`launch_bounds`). Proximity fused-min is still open.
 
 Local env (do not push `.venv`):
 
@@ -52,6 +54,24 @@ Closest-hit gets *more* efficient as `N` grows (occupancy). Memory stays ~linear
 in `N` and ~`n_meshes×` smaller than legacy. Lidar vs camera depth still matches
 in the mean (`~6e-7`); at `N=1024` a few pixels miss `atol=1e-4` (max `3.33`) —
 likely a grazing/tie difference, not a batch-wide drift.
+
+## Round 2 results (2026-08-20)
+
+Same G1 scene. Closest-hit output buffers are now reused on the raycaster.
+
+| knob | N=64 | N=1024 | keep? |
+| --- | --- | --- | --- |
+| buffer reuse (vs R1 closest) | 1.86→1.78 ms, 48→39 MB | 18.19→18.08 ms, 770→626 MB | **yes** (always on) |
+| CUDA graph replay | 1.78→1.62 ms (**1.10×**) | 18.08→18.05 ms (~0%) | **yes as opt-in** (`capture_fused` / `use_graph`) |
+| `bvh_constructor=sah` | 1.95 ms (worse than lbvh 1.78) | — | no |
+| `bvh_constructor=median` | 2.17 ms (worse) | — | no |
+| merge ground+cube | 1.70 vs 1.78 ms (~4.5%) | — | scene tip only; under 5% |
+
+`launch_bounds` / `bvh_leaf_size` / cuBQL need Warp ≥ 1.9 / 1.11 / 1.13.
+
+```bash
+.venv/bin/python scripts/bench_g1_camera.py --graph --sweep-bvh --skip-unfused
+```
 
 `raycast_fused(..., closest_hit=True)` is the new default. Keep
 `closest_hit=False` until a later round deletes the 3D kernels.
@@ -227,59 +247,31 @@ Stop a line of work when two consecutive knobs move the headline `N=64,
 - [x] Serial in-kernel min (not `atomic_min`)
 - [ ] Same fused-output idea for `MeshProximitySensor` (later)
 
-### Step 2 — BVH constructor / leaf size
+### Step 2 — BVH constructor / leaf size (done on Warp 1.6)
 
-Expose on `trimesh2wp()` (and therefore every factory):
+- [x] `trimesh2wp(..., bvh_constructor=, bvh_leaf_size=)` forwards only kwargs the
+      installed Warp accepts
+- [x] G1 sweep: **lbvh (default) fastest**; sah 1.95 ms, median 2.17 ms vs lbvh 1.78
+- [ ] `bvh_leaf_size` / `cubql` — not in Warp 1.6; revisit on ≥ 1.13 hosts
 
-- `bvh_constructor`: `None` (Warp default), `"lbvh"`, `"sah"`, `"cubql"` if
-  `wp.__version__ >= 1.13` and the build has cuBQL. Keep default as today.
-- `bvh_leaf_size` if Warp ≥ 1.9 (default 4). Sweep `{1, 4, 8}` on the G1
-  scene.
+Do not raise the `warp-lang` floor until a newer feature is actually adopted.
 
-cuBQL is **ray-query only** until Warp 1.15 (point queries needed for
-proximity). Do not turn it on globally if proximity shares those `wp.Mesh`
-objects. Optional per-mesh flag: lidar/camera meshes `cubql`, proximity
-meshes default.
+### Step 3 — allocation / graph capture (done)
 
-If cuBQL is missing or errors (no mempool, GH-1430 / 1.15 fix), skip and
-document the Warp version.
+- [x] Reuse `[N, n_rays]` hit buffers (overwritten on the next call)
+- [x] `capture_fused` + `raycast_fused(use_graph=True)`
+- [x] Graph ~10% at N=64, ~0% at N=1024
 
-**Do not** raise the `warp-lang` floor until a feature is actually adopted
-and host stacks that ship older Warp are called out in the PR.
+### Step 4 — launch tuning (blocked on Warp 1.6)
 
-### Step 3 — allocation / graph capture
-
-After output shape is `[N, n_rays]`:
-
-- Preallocate hit buffers on the raycaster; skip `torch.empty` every call
-  when shapes match.
-- Optional: persistent `enabled` ones tensor.
-- CUDA graph (`wp.ScopedCapture` / `wp.capture_launch`) for the fixed-shape
-  fused launch. Capture **after** warmup/compile. Only replay when `N`,
-  `n_rays`, `n_meshes` are unchanged. This is the training-loop win; the
-  random-camera bench can still retarget poses in-place (same storage).
-
-Isaac V2 pose concat stays Python; graphs help most once poses already live
-in GPU tensors (this standalone bench).
-
-### Step 4 — launch tuning (only if Nsight / occupancy says so)
-
-- `@wp.kernel(launch_bounds=...)` (Warp 1.11+)
-- `wp.get_suggested_block_size()` (1.13+)
-- After Step 1, lidar launch dim is `(N, n_rays)` — much healthier than
-  `(N, n_meshes, n_rays)` with a tiny mesh axis.
-
-Do not sweep this until Steps 1–2 are in.
+- `@wp.kernel(launch_bounds=...)` needs Warp 1.11+
+- `wp.get_suggested_block_size()` needs 1.13+
 
 ### Step 5 — optional / later
 
-- Grouped `wp.Mesh(..., groups=...)` to replace the per-body list in
-  multi-env Isaac. Registration redesign; out of scope for the first pass.
-- Combine static ground+cube into one world-frame mesh (identity pose).
-  Cheap, but do not merge G1 bodies (they move independently).
-- Mesh simplification (`simplify_factor`) as a **quality/perf trade**, not
-  a kernel optimization. Report a 0.0 vs 0.5 pair if triangle count dominates.
-- RMM / shared CUDA allocator with PyTorch: Isaac training only.
+- Grouped `wp.Mesh(..., groups=...)` — Isaac multi-env redesign
+- Merge ground+cube: **~4.5%** at N=64, below keep threshold; `--merge-static` in the bench
+- Mesh simplification / RMM: not this venv
 
 ## 6. Out of scope (same as `AGENTS.md`)
 

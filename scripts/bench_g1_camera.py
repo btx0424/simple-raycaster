@@ -117,14 +117,26 @@ def pinhole_rays(
     return ray_starts.contiguous(), ray_dirs.contiguous()
 
 
-def load_scene(xml_path: str, device: str) -> tuple[MultiMeshRaycaster, torch.Tensor, torch.Tensor, dict]:
+def load_scene(
+    xml_path: str,
+    device: str,
+    *,
+    bvh_constructor: str | None = None,
+    merge_static: bool = False,
+) -> tuple[MultiMeshRaycaster, torch.Tensor, torch.Tensor, dict]:
     xml_path = str(Path(xml_path).resolve())
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
 
     body_names = [model.body(i).name for i in range(model.nbody)]
-    g1 = MultiMeshRaycaster.from_MjModel(body_names, model, device=device, simplify_factor=0.0)
+    g1 = MultiMeshRaycaster.from_MjModel(
+        body_names,
+        model,
+        device=device,
+        simplify_factor=0.0,
+        bvh_constructor=bvh_constructor,
+    )
     mesh_names = list(g1.mesh_names or [])
     name_to_id = {model.body(i).name: i for i in range(model.nbody)}
 
@@ -143,9 +155,16 @@ def load_scene(xml_path: str, device: str) -> tuple[MultiMeshRaycaster, torch.Te
     ground.apply_translation((0.0, 0.0, -0.025))
     cube = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
     cube.apply_translation((0.45, 0.0, 0.25))
+    static_meshes: list = [ground, cube]
+    if merge_static:
+        static_meshes = [trimesh.util.concatenate(static_meshes)]
+    n_static = len(static_meshes)
 
-    raycaster = MultiMeshRaycaster([ground, cube, *g1.meshes_wp], device=device)
-    n_static = 2
+    raycaster = MultiMeshRaycaster(
+        [*static_meshes, *g1.meshes_wp],
+        device=device,
+        bvh_constructor=bvh_constructor,
+    )
     stats = {
         "g1_xml": xml_path,
         "n_g1_bodies": len(mesh_names),
@@ -153,6 +172,8 @@ def load_scene(xml_path: str, device: str) -> tuple[MultiMeshRaycaster, torch.Te
         "n_points": raycaster.n_points,
         "n_faces": raycaster.n_faces,
         "g1_names": mesh_names,
+        "bvh_constructor": bvh_constructor or "default(lbvh)",
+        "merge_static": merge_static,
     }
     return raycaster, g1_pos, g1_quat, stats | {"n_static": n_static}
 
@@ -233,6 +254,19 @@ def main() -> None:
     parser.add_argument("--skip-unfused", action="store_true")
     parser.add_argument("--skip-legacy", action="store_true")
     parser.add_argument("--skip-camera", action="store_true")
+    parser.add_argument(
+        "--bvh",
+        type=str,
+        default=None,
+        help="wp.Mesh bvh_constructor: sah, median, lbvh (default: Warp CUDA lbvh)",
+    )
+    parser.add_argument(
+        "--sweep-bvh",
+        action="store_true",
+        help="Rebuild the scene for sah/median/lbvh and time closest-hit only",
+    )
+    parser.add_argument("--merge-static", action="store_true", help="Concatenate ground+cube into one mesh")
+    parser.add_argument("--graph", action="store_true", help="Also bench CUDA graph replay of fused closest-hit")
     parser.add_argument("--json-out", type=str, default="")
     args = parser.parse_args()
 
@@ -242,7 +276,12 @@ def main() -> None:
     torch_device = torch.device(device)
 
     wp.init()
-    raycaster, g1_pos, g1_quat, stats = load_scene(args.xml, device)
+    raycaster, g1_pos, g1_quat, stats = load_scene(
+        args.xml,
+        device,
+        bvh_constructor=args.bvh,
+        merge_static=args.merge_static,
+    )
     n_static = stats["n_static"]
     mesh_pos, mesh_quat = expand_poses(args.n, g1_pos, g1_quat, n_static)
 
@@ -269,6 +308,7 @@ def main() -> None:
         f"verts {stats['n_points']}  faces {stats['n_faces']}"
     )
     print(f"N={args.n}  {args.width}x{args.height} ({n_rays} rays)  fov={args.fov}  max_dist={args.max_dist}")
+    print(f"bvh={stats['bvh_constructor']}  merge_static={stats['merge_static']}")
     print(raycaster)
 
     kwargs = dict(
@@ -282,6 +322,7 @@ def main() -> None:
 
     print("\nParity (one shot)...")
     pos_new, dist_new, nrm_new = raycaster.raycast_fused(**kwargs, closest_hit=True)
+    pos_new, dist_new, nrm_new = pos_new.clone(), dist_new.clone(), nrm_new.clone()
     hit_frac = float((dist_new < args.max_dist - 1e-4).float().mean())
     print(f"  closest-hit hit_frac={hit_frac:.3f}")
     if hit_frac < 0.3:
@@ -366,6 +407,42 @@ def main() -> None:
             "camera_rgbd",
             lambda: cam.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat),
         )
+    if args.graph:
+        print("\nCapturing CUDA graph...")
+        try:
+            raycaster.capture_fused(**kwargs)
+            add_result(
+                "lidar_fused_graph",
+                lambda: raycaster.raycast_fused(**kwargs, closest_hit=True, use_graph=True),
+            )
+        except Exception as exc:
+            print(f"  graph capture failed: {type(exc).__name__}: {exc}")
+    if args.sweep_bvh:
+        already = args.bvh or "lbvh"
+        for ctor in ("lbvh", "sah", "median"):
+            if ctor == already:
+                continue
+            print(f"\nRebuilding scene bvh_constructor={ctor}...")
+            rc, gp, gq, st = load_scene(
+                args.xml,
+                device,
+                bvh_constructor=ctor,
+                merge_static=args.merge_static,
+            )
+            print(f"  {rc}")
+            mp, mq = expand_poses(args.n, gp, gq, st["n_static"])
+            kw = dict(
+                mesh_pos_w=mp,
+                mesh_quat_w=mq,
+                ray_starts_w=ray_starts,
+                ray_dirs_w=ray_dirs,
+                min_dist=args.min_dist,
+                max_dist=args.max_dist,
+            )
+            add_result(
+                f"lidar_fused_bvh_{ctor}",
+                lambda rc=rc, kw=kw: rc.raycast_fused(**kw, closest_hit=True),
+            )
 
     print("\n" + "=" * 70)
     print("RESULTS")
@@ -387,7 +464,10 @@ def main() -> None:
         "fov": args.fov,
         "n_rays": n_rays,
         "hit_frac": hit_frac,
-        "scene": {k: stats[k] for k in ("n_meshes", "n_points", "n_faces", "n_g1_bodies")},
+        "scene": {
+            k: stats[k]
+            for k in ("n_meshes", "n_points", "n_faces", "n_g1_bodies", "bvh_constructor", "merge_static")
+        },
         "parity": parity_rows,
         "results": results,
     }

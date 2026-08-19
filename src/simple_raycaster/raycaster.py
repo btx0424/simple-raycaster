@@ -6,7 +6,7 @@ import mujoco
 
 from typing import Optional, List, Union
 from jaxtyping import Float, Bool, Int
-from .helpers import quat_rotate, quat_rotate_inverse, trimesh2wp
+from .helpers import quat_rotate, quat_rotate_inverse, trimesh2wp, workspace_tensor
 from .kernels import (
     raycast_kernel,
     raycast_against_meshes_kernel,
@@ -27,9 +27,25 @@ class MultiMeshRaycaster:
         meshes: List of wp.Mesh objects.
     """
 
-    def __init__(self, meshes_wp: List[MeshType], device: str | torch.device):
+    def __init__(
+        self,
+        meshes_wp: List[MeshType],
+        device: str | torch.device,
+        *,
+        bvh_constructor: str | None = None,
+        bvh_leaf_size: int | None = None,
+    ):
+        self.bvh_constructor = bvh_constructor
+        self.bvh_leaf_size = bvh_leaf_size
         self.meshes_wp = [
-            mesh_wp if isinstance(mesh_wp, wp.Mesh) else trimesh2wp(mesh_wp, device)
+            mesh_wp
+            if isinstance(mesh_wp, wp.Mesh)
+            else trimesh2wp(
+                mesh_wp,
+                device,
+                bvh_constructor=bvh_constructor,
+                bvh_leaf_size=bvh_leaf_size,
+            )
             for mesh_wp in meshes_wp
         ]
         if not isinstance(device, str):
@@ -37,12 +53,145 @@ class MultiMeshRaycaster:
         self.device = device
         self.mesh_names = None
         self.initialized = False
+        self._work: dict = {}
+        self._graph = None
+        self._graph_key = None
     
     def initialize(self):
         if self.initialized:
             return
         self.initialized = True
         self.meshes_array = wp.array([mesh_wp.id for mesh_wp in self.meshes_wp], device=self.device, dtype=wp.uint64)
+        self._graph = None
+
+    def _cached(self, key: str, shape: tuple, dtype: torch.dtype, device) -> torch.Tensor:
+        return workspace_tensor(self._work, key, shape, dtype, device)
+
+    def _default_enabled(self, n: int, device) -> torch.Tensor:
+        prev = self._work.get("enabled_true")
+        enabled = self._cached("enabled_true", (n,), torch.bool, device)
+        if prev is None or prev is not enabled:
+            enabled.fill_(True)
+        return enabled
+
+    def _launch_closest_hit(
+        self,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
+        ray_starts_w: torch.Tensor,
+        ray_dirs_w: torch.Tensor,
+        enabled: torch.Tensor,
+        min_dist: float,
+        max_dist: float,
+        hit_distances: torch.Tensor,
+        hit_normals: torch.Tensor,
+        mesh_indices: torch.Tensor | None,
+    ) -> None:
+        n, n_rays = ray_dirs_w.shape[:2]
+        if mesh_indices is None:
+            if mesh_pos_w.shape[1] != self.n_meshes or mesh_quat_w.shape[1] != self.n_meshes:
+                raise ValueError(
+                    f"`mesh_pos_w` and `mesh_quat_w` must have the same number of meshes "
+                    f"as the raycaster: {self.n_meshes}"
+                )
+            wp.launch(
+                transform_and_raycast_closest_kernel,
+                dim=(n, n_rays),
+                inputs=[
+                    self.meshes_array,
+                    wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
+                    wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                    min_dist,
+                    max_dist,
+                ],
+                outputs=[
+                    wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+        else:
+            assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
+                "`mesh_indices` must have the same number of meshes as `mesh_pos_w` and `mesh_quat_w`"
+            )
+            wp.launch(
+                transform_and_raycast_closest_against_meshes_kernel,
+                dim=(n, n_rays),
+                inputs=[
+                    self.meshes_array,
+                    wp.from_torch(mesh_indices, dtype=wp.int64, return_ctype=True),
+                    wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
+                    wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
+                    min_dist,
+                    max_dist,
+                ],
+                outputs=[
+                    wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
+                    wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
+                ],
+                device=self.device,
+                record_tape=False,
+            )
+
+    def capture_fused(
+        self,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
+        ray_starts_w: torch.Tensor,
+        ray_dirs_w: torch.Tensor,
+        min_dist: float = 0.0,
+        max_dist: float = 100.0,
+        *,
+        enabled: torch.Tensor | None = None,
+        mesh_indices: torch.Tensor | None = None,
+    ):
+        """Capture a CUDA graph of the closest-hit fused kernel for these buffers.
+
+        Replay with ``raycast_fused(..., use_graph=True)``. Input tensors must keep
+        the same storage (in-place pose/ray updates are fine).
+        """
+        if not self.initialized:
+            self.initialize()
+        n, n_rays = ray_dirs_w.shape[:2]
+        device = ray_starts_w.device
+        if enabled is None:
+            enabled = self._default_enabled(n, device)
+        else:
+            enabled = enabled.reshape(n)
+        hit_distances = self._cached("closest_dist", (n, n_rays), torch.float32, device)
+        hit_normals = self._cached("closest_nrm", (n, n_rays, 3), torch.float32, device)
+        self._launch_closest_hit(
+            mesh_pos_w, mesh_quat_w, ray_starts_w, ray_dirs_w, enabled,
+            min_dist, max_dist, hit_distances, hit_normals, mesh_indices,
+        )
+        torch.cuda.synchronize(device)
+        wp.synchronize()
+        with wp.ScopedCapture(device=self.device, force_module_load=False) as cap:
+            self._launch_closest_hit(
+                mesh_pos_w, mesh_quat_w, ray_starts_w, ray_dirs_w, enabled,
+                min_dist, max_dist, hit_distances, hit_normals, mesh_indices,
+            )
+        self._graph = cap.graph
+        self._graph_key = (
+            mesh_pos_w.data_ptr(),
+            mesh_quat_w.data_ptr(),
+            ray_starts_w.data_ptr(),
+            ray_dirs_w.data_ptr(),
+            enabled.data_ptr(),
+            None if mesh_indices is None else mesh_indices.data_ptr(),
+            float(min_dist),
+            float(max_dist),
+            tuple(mesh_pos_w.shape),
+            tuple(ray_dirs_w.shape),
+        )
+        return self._graph
     
     def add_mesh(self, mesh: MeshType):
         """
@@ -52,9 +201,15 @@ class MultiMeshRaycaster:
             mesh: The mesh to add. Can be a trimesh.Trimesh object or a wp.Mesh object.
         """
         if isinstance(mesh, trimesh.Trimesh):
-            mesh = trimesh2wp(mesh, self.device)
+            mesh = trimesh2wp(
+                mesh,
+                self.device,
+                bvh_constructor=self.bvh_constructor,
+                bvh_leaf_size=self.bvh_leaf_size,
+            )
         self.meshes_wp.append(mesh)
         self.initialized = False
+        self._graph = None
     
     def add_from_path(
         self,
@@ -286,6 +441,7 @@ class MultiMeshRaycaster:
         enabled: Optional[Bool[torch.Tensor, "N"]]=None,  # [N]
         mesh_indices: Optional[Int[torch.Tensor, "N n_meshes"]]=None,  # [N, n_meshes]
         closest_hit: bool = True,
+        use_graph: bool = False,
     ) -> tuple[Float[torch.Tensor, "N n_rays 3"], Float[torch.Tensor, "N n_rays"], Float[torch.Tensor, "N n_rays 3"]]:
         """
         Perform raycasting against multiple meshes using a fused GPU kernel.
@@ -353,8 +509,11 @@ class MultiMeshRaycaster:
             - Quaternions are converted from WXYZ to XYZW format internally for Warp compatibility.
             - All input tensors must be on the same device as the raycaster.
             - ``closest_hit=True`` (default) loops meshes in-kernel and writes
-              ``[N, n_rays]`` directly. ``closest_hit=False`` keeps the older
-              per-mesh buffer plus PyTorch ``min`` (parity / baseline).
+              ``[N, n_rays]`` directly. Output buffers are reused across calls
+              with the same shape (valid until the next call).
+              ``closest_hit=False`` keeps the older per-mesh buffer plus PyTorch
+              ``min`` (parity / baseline).
+            - ``use_graph=True`` replays a graph from :meth:`capture_fused`.
         
         Example:
             >>> raycaster = MultiMeshRaycaster(meshes, device="cuda")
@@ -375,65 +534,39 @@ class MultiMeshRaycaster:
         N = mesh_pos_w.shape[0]
 
         if enabled is None:
-            enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
+            enabled = self._default_enabled(N, ray_starts_w.device)
         else:
             enabled = enabled.reshape(N,)
 
         if closest_hit:
-            hit_distances = torch.empty((N, n_rays), device=ray_starts_w.device)
-            hit_normals = torch.empty(N, n_rays, 3, device=ray_starts_w.device)
-            if mesh_indices is None:
-                if mesh_pos_w.shape[1] != self.n_meshes or mesh_quat_w.shape[1] != self.n_meshes:
-                    raise ValueError(
-                        f"`mesh_pos_w` and `mesh_quat_w` must have the same number of meshes "
-                        f"as the raycaster: {self.n_meshes}"
-                    )
-                wp.launch(
-                    transform_and_raycast_closest_kernel,
-                    dim=(N, n_rays),
-                    inputs=[
-                        self.meshes_array,
-                        wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
-                        wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
-                        wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
-                        wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
-                        wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
-                        min_dist,
-                        max_dist,
-                    ],
-                    outputs=[
-                        wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
-                        wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
-                    ],
-                    device=self.device,
-                    record_tape=False,
-                )
+            hit_distances = self._cached(
+                "closest_dist", (N, n_rays), torch.float32, ray_starts_w.device
+            )
+            hit_normals = self._cached(
+                "closest_nrm", (N, n_rays, 3), torch.float32, ray_starts_w.device
+            )
+            if use_graph:
+                if self._graph is None:
+                    raise RuntimeError("use_graph=True requires capture_fused() first")
+                wp.capture_launch(self._graph)
             else:
-                assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
-                    "`mesh_indices` must have the same number of meshes as `mesh_pos_w` and `mesh_quat_w`"
+                self._launch_closest_hit(
+                    mesh_pos_w,
+                    mesh_quat_w,
+                    ray_starts_w,
+                    ray_dirs_w,
+                    enabled,
+                    min_dist,
+                    max_dist,
+                    hit_distances,
+                    hit_normals,
+                    mesh_indices,
                 )
-                wp.launch(
-                    transform_and_raycast_closest_against_meshes_kernel,
-                    dim=(N, n_rays),
-                    inputs=[
-                        self.meshes_array,
-                        wp.from_torch(mesh_indices, dtype=wp.int64, return_ctype=True),
-                        wp.from_torch(mesh_pos_w, dtype=wp.vec3, return_ctype=True),
-                        wp.from_torch(mesh_quat_w, dtype=wp.vec4, return_ctype=True),
-                        wp.from_torch(ray_starts_w, dtype=wp.vec3, return_ctype=True),
-                        wp.from_torch(ray_dirs_w, dtype=wp.vec3, return_ctype=True),
-                        wp.from_torch(enabled, dtype=wp.bool, return_ctype=True),
-                        min_dist,
-                        max_dist,
-                    ],
-                    outputs=[
-                        wp.from_torch(hit_distances, dtype=wp.float32, return_ctype=True),
-                        wp.from_torch(hit_normals, dtype=wp.vec3, return_ctype=True),
-                    ],
-                    device=self.device,
-                    record_tape=False,
-                )
-            hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+            hit_positions = self._cached(
+                "closest_pos", (N, n_rays, 3), torch.float32, ray_starts_w.device
+            )
+            torch.mul(ray_dirs_w, hit_distances.unsqueeze(-1), out=hit_positions)
+            hit_positions.add_(ray_starts_w)
             return hit_positions, hit_distances, hit_normals
 
         if mesh_indices is None:
@@ -510,6 +643,8 @@ class MultiMeshRaycaster:
         stage: "Usd.Stage",
         device: str,
         simplify_factor: float = 0.0,
+        bvh_constructor: str | None = None,
+        bvh_leaf_size: int | None = None,
     ):
         """
         Args:
@@ -547,12 +682,24 @@ class MultiMeshRaycaster:
                 n_verts_after += mesh_combined.vertices.shape[0]
                 n_faces_after += mesh_combined.faces.shape[0]
 
-                meshes_wp.append(trimesh2wp(mesh_combined, device))
+                meshes_wp.append(
+                    trimesh2wp(
+                        mesh_combined,
+                        device,
+                        bvh_constructor=bvh_constructor,
+                        bvh_leaf_size=bvh_leaf_size,
+                    )
+                )
 
         if n_faces_before != n_faces_after:
             print(f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})")
 
-        return cls(meshes_wp, device)
+        return cls(
+            meshes_wp,
+            device,
+            bvh_constructor=bvh_constructor,
+            bvh_leaf_size=bvh_leaf_size,
+        )
     
 
     @classmethod
@@ -562,6 +709,8 @@ class MultiMeshRaycaster:
         model: mujoco.MjModel,
         device: str,
         simplify_factor: float = 0.0,
+        bvh_constructor: str | None = None,
+        bvh_leaf_size: int | None = None,
     ):
         """
         Args:
@@ -595,11 +744,23 @@ class MultiMeshRaycaster:
             n_faces_after += mesh.faces.shape[0]
 
             mesh_names.append(body.name)
-            meshes_wp.append(trimesh2wp(mesh, device))
+            meshes_wp.append(
+                trimesh2wp(
+                    mesh,
+                    device,
+                    bvh_constructor=bvh_constructor,
+                    bvh_leaf_size=bvh_leaf_size,
+                )
+            )
 
         if n_faces_before != n_faces_after:
             print(f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})")
 
-        inst = cls(meshes_wp, device)
+        inst = cls(
+            meshes_wp,
+            device,
+            bvh_constructor=bvh_constructor,
+            bvh_leaf_size=bvh_leaf_size,
+        )
         inst.mesh_names = mesh_names
         return inst
