@@ -4,10 +4,10 @@ Working document for optimizing `simple-raycaster` on a realistic camera workloa
 This refines the original stub (test scene + Warp review + measure/iterate) using
 the current code, `AGENTS.md`, and the Warp 1.7–1.16 APIs we can actually use.
 
-**Status:** Round 2 done on Warp 1.6: BVH constructor sweep, fused buffer reuse,
-CUDA graph replay. Default BVH stays **lbvh**. Graphs help small N; at N=1024
-the kernel dominates. Next on this venv is limited (no cuBQL / `bvh_leaf_size` /
-`launch_bounds`). Proximity fused-min is still open.
+**Status:** Round 3 saturated on Warp 1.6. Closest-hit now shrinks `mesh_query_ray`
+tmax, writes positions in-kernel, and launches at **block_dim=128**. Proximity
+fused-min is in. Mesh-order / simplify knobs did not clear 5%. Further Warp 1.6
+launch knobs (`launch_bounds`, `bvh_leaf_size`, cuBQL) are unavailable.
 
 Local env (do not push `.venv`):
 
@@ -76,6 +76,52 @@ Same G1 scene. Closest-hit output buffers are now reused on the raycaster.
 `raycast_fused(..., closest_hit=True)` is the new default. Keep
 `closest_hit=False` until a later round deletes the 3D kernels.
 
+## Round 3 results (2026-08-20)
+
+Same G1 scene. Closest-hit kernels now pass the running `best_t` into
+`mesh_query_ray` (camera too), write hit positions in-kernel, and launch
+with `block_dim=128` (Warp default is 256).
+
+Headline `N=64`, `128×96`:
+
+| path | R2 ms | R3 ms | vs R2 | peak |
+| --- | ---: | ---: | ---: | ---: |
+| `lidar_fused_closest` | 1.78 | **0.89** | **2.00×** | 39 MB |
+| `lidar_fused_graph` | 1.62 | **0.81** | **2.00×** | 52 MB |
+| `lidar_fused_legacy` | 2.27 | 2.26 | ~0% | 782 MB |
+| `camera_rgbd` | 1.77 | **0.93** | **1.91×** | 52 MB |
+
+N=1024 closest: **18.08 → 9.07 ms** (1.99×), lidar-only peak still ~626 MB.
+Graph is still ~9% at N=64 and ~0% at N=1024.
+
+Parity: distances vs legacy **exact**; in-kernel positions `max abs 9.5e-7`
+(was exact with torch mul). `mesh_indices` identity subset exact. Camera
+ray-depth vs lidar unchanged (`max 1.8e-5`). At N=1024 a few pixels still
+miss `atol=1e-4` (max `3.33`) — same grazing/tie note as R1.
+
+### Knobs
+
+| knob | N=64 closest | keep? |
+| --- | --- | --- |
+| shrink `mesh_query_ray` tmax to `best_t` (+ in-kernel positions) | 1.78→0.96 ms (**1.85×**) | **yes** (always on) |
+| `block_dim=128` (vs Warp 256) | 0.96→0.88 ms (**~11%**); N=1024 10.4→9.2 ms | **yes** (default 128; 32/64 close, 512 worse) |
+| proximity fused-min (256 probes, max_dist=2) | 7.91→1.69 ms (**4.7×**), exact parity | **yes** (`query(..., closest_hit=True)` default) |
+| camera output reuse + in-place clamp | camera 0.98→0.93 ms (~5%), less peak at N=1024 | **yes** (same overwrite contract as lidar) |
+| `--robot-first` (G1 bodies before ground) | 0.96→1.53 ms (worse) | **no** — large ground-first lets tmax shrink before 59 body BVHs |
+| `--cube-first` | 0.96→0.96 ms | no |
+| `simplify_factor=0.5` (542k→271k faces) | 0.96→0.93 ms (2.7%) | no (under 5%, changes geometry) |
+
+`block_dim` sweep (400 iters, N=64): 32=0.840, 64=0.847, **128=0.828**, 256=0.937, 512=0.989.
+Same ranking at N=1024. Override with `raycaster.block_dim = …`.
+
+Saturation: two mesh-order knobs and simplify all moved the headline by
+<5% or made it slower. Remaining Warp 1.6 ideas (cuBQL, `bvh_leaf_size`,
+`launch_bounds`) need a newer Warp. Stop.
+
+```bash
+.venv/bin/python scripts/bench_g1_camera.py --skip-unfused --graph --proximity
+```
+
 ## 1. Goal
 
 Make the **production GPU path** faster and cheaper in peak memory for a
@@ -100,22 +146,21 @@ kernels change.
 
 Facts that the original stub did not spell out:
 
-- Fused lidar kernels (`transform_and_raycast_kernel` and
-  `transform_and_raycast_against_meshes_kernel` in `kernels.py`) still allocate
-  a **per-mesh** distance/normal buffer. Closest hit is a host-side
-  `hit_distances.min(dim=1)` plus a `gather` for the winning normal.
-- Memory scales as `O(N × n_meshes × n_rays)`. For G1 this is painful:
-  ~60–70 mesh-bearing bodies (full body + Inspire fingers) × camera-resolution
-  rays × env batch.
+- Fused lidar closest-hit kernels loop meshes in-kernel, shrink
+  `mesh_query_ray` tmax to the running closest `t`, and write
+  `[N, n_rays]` distances / normals / positions. Default `block_dim=128`.
+  Legacy `closest_hit=False` still uses a per-mesh buffer + PyTorch `.min`.
+- `MeshProximitySensor.query` defaults to the same fused-min pattern
+  (`closest_hit=True`).
+- Closest-hit memory scales as `O(N × n_rays)`. Legacy `closest_hit=False`
+  is still `O(N × n_meshes × n_rays)`.
 - Each body is a separate `wp.Mesh` BVH (`helpers.trimesh2wp()`). Default
-  constructor is Warp’s CUDA default (`lbvh`); `bvh_constructor` and
-  `bvh_leaf_size` are **not** exposed.
-- Per-call Python overhead: `torch.empty` for those 3D buffers, several
-  `wp.from_torch(..., return_ctype=True)`, no buffer reuse, no CUDA graph.
-- `RaycastCamera` already loops `for m in range(n_meshes)` and keeps
-  `best_t` / `best_n` in registers. Copy this for lidar instead of jumping
-  straight to `wp.atomic_min` (atomics fight with “also keep the winning
-  normal”; packing `t` + mesh id is extra complexity).
+  constructor is Warp’s CUDA default (`lbvh`); `bvh_constructor` is exposed,
+  `bvh_leaf_size` only when the installed Warp accepts it.
+- Closest-hit output buffers are reused; `capture_fused` / `use_graph` is
+  opt-in. Returned tensors are overwritten on the next call.
+- `RaycastCamera` loops meshes in-kernel with shrinking tmax, reuses RGB-D
+  buffers, and uses the same `block_dim=128`.
 - `scripts/advanced.py` benchmarks a 64×64 **box grid**, not this scene.
   `scripts/example.py` can load MJCF but uses a fixed 32×32 lidar fan, not
   random cameras.
@@ -245,7 +290,7 @@ Stop a line of work when two consecutive knobs move the headline `N=64,
 - [x] `transform_and_raycast_closest_kernel` (+ `mesh_indices` variant)
 - [x] Wired in `raycaster.py` / `raycaster_v2.py`; default `closest_hit=True`
 - [x] Serial in-kernel min (not `atomic_min`)
-- [ ] Same fused-output idea for `MeshProximitySensor` (later)
+- [x] Same fused-output idea for `MeshProximitySensor` (`closest_hit=True`)
 
 ### Step 2 — BVH constructor / leaf size (done on Warp 1.6)
 
@@ -262,8 +307,9 @@ Do not raise the `warp-lang` floor until a newer feature is actually adopted.
 - [x] `capture_fused` + `raycast_fused(use_graph=True)`
 - [x] Graph ~10% at N=64, ~0% at N=1024
 
-### Step 4 — launch tuning (blocked on Warp 1.6)
+### Step 4 — launch tuning (partial on Warp 1.6)
 
+- [x] `wp.launch(..., block_dim=128)` default for closest-hit (Warp 1.6)
 - `@wp.kernel(launch_bounds=...)` needs Warp 1.11+
 - `wp.get_suggested_block_size()` needs 1.13+
 
@@ -271,7 +317,9 @@ Do not raise the `warp-lang` floor until a newer feature is actually adopted.
 
 - Grouped `wp.Mesh(..., groups=...)` — Isaac multi-env redesign
 - Merge ground+cube: **~4.5%** at N=64, below keep threshold; `--merge-static` in the bench
-- Mesh simplification / RMM: not this venv
+- Mesh simplification / RMM: `simplify_factor=0.5` is **2.7%** on G1; not default
+- Query likely-hit **large** meshes first (ground before 59 G1 bodies).
+  `--robot-first` was slower.
 
 ## 6. Out of scope (same as `AGENTS.md`)
 

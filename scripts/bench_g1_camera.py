@@ -441,6 +441,8 @@ def main() -> None:
         del pos_u, dist_u, nrm_u
     if depth_cam is not None:
         del rgb, depth_cam, mask, dist_img
+    if cam is not None:
+        cam._work.clear()
     torch.cuda.empty_cache()
     torch.cuda.synchronize(torch_device)
 
