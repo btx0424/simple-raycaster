@@ -97,6 +97,12 @@ Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays], hit_normals
 4. **Empty raycast** — raycasting with zero registered meshes raises in `_get_mesh_poses_w`.
 5. **Selective indices shape** — with `mesh_indices`, pose tensors and indices must share the same `[N, n_subset]` mesh dimension.
 
+## Warp versioning
+
+Declare `warp-lang>=1.7,<2` in `pyproject.toml`. **Do not** add a 1.x upper bound (`<1.13` etc.). Isaac Sim 5.1, mjlab, and Isaac Sim 6 ship different Warp 1.x releases in the same process as this library; an upper bound makes the package uninstallable in newer stacks. Host `pyproject.toml` files pin the exact Warp. Optional extras per Warp version are not useful — a venv can have only one `warp-lang`.
+
+When adopting a Warp feature that needs a newer minimum (cuBQL BVH, graph capture, …), raise the **floor** (`>=1.13`) and note which host stacks that drops.
+
 ## Build & Validation Commands
 
 ```bash
