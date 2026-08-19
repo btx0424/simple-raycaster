@@ -56,6 +56,7 @@ class MultiMeshRaycaster:
         self._work: dict = {}
         self._graph = None
         self._graph_key = None
+        self.block_dim = 256
     
     def initialize(self):
         if self.initialized:
@@ -115,6 +116,7 @@ class MultiMeshRaycaster:
                 ],
                 device=self.device,
                 record_tape=False,
+                block_dim=self.block_dim,
             )
         else:
             assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
@@ -141,6 +143,7 @@ class MultiMeshRaycaster:
                 ],
                 device=self.device,
                 record_tape=False,
+                block_dim=self.block_dim,
             )
 
     def capture_fused(

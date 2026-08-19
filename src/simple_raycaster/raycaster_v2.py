@@ -50,6 +50,7 @@ class MultiMeshRaycasterV2:
         self.bvh_leaf_size = bvh_leaf_size
         self.initialized = False
         self._work: dict = {}
+        self.block_dim = 256
     
     def initialize(self):
         if self.initialized:
@@ -447,6 +448,7 @@ class MultiMeshRaycasterV2:
                     ],
                     device=self.device,
                     record_tape=False,
+                    block_dim=self.block_dim,
                 )
             else:
                 assert mesh_indices.shape == mesh_pos_w.shape[:2] == mesh_quat_w.shape[:2], (
@@ -473,6 +475,7 @@ class MultiMeshRaycasterV2:
                     ],
                     device=self.device,
                     record_tape=False,
+                    block_dim=self.block_dim,
                 )
             return hit_positions, hit_distances, hit_normals
 

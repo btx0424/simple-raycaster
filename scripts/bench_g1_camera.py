@@ -128,6 +128,7 @@ def load_scene(
     bvh_constructor: str | None = None,
     merge_static: bool = False,
     robot_first: bool = False,
+    cube_first: bool = False,
     simplify_factor: float = 0.0,
 ) -> tuple[MultiMeshRaycaster, torch.Tensor, torch.Tensor, dict]:
     xml_path = str(Path(xml_path).resolve())
@@ -162,6 +163,8 @@ def load_scene(
     cube = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
     cube.apply_translation((0.45, 0.0, 0.25))
     static_meshes: list = [ground, cube]
+    if cube_first:
+        static_meshes = [cube, ground]
     if merge_static:
         static_meshes = [trimesh.util.concatenate(static_meshes)]
     n_static = len(static_meshes)
@@ -185,6 +188,7 @@ def load_scene(
         "bvh_constructor": bvh_constructor or "default(lbvh)",
         "merge_static": merge_static,
         "robot_first": robot_first,
+        "cube_first": cube_first,
         "simplify_factor": simplify_factor,
     }
     return raycaster, g1_pos, g1_quat, stats | {"n_static": n_static}
@@ -287,6 +291,13 @@ def main() -> None:
     )
     parser.add_argument("--merge-static", action="store_true", help="Concatenate ground+cube into one mesh")
     parser.add_argument("--robot-first", action="store_true", help="Query G1 body meshes before ground/cube")
+    parser.add_argument("--cube-first", action="store_true", help="Query the nearby cube before the ground plane")
+    parser.add_argument("--block-dim", type=int, default=256, help="CUDA threads per block for closest-hit kernel")
+    parser.add_argument(
+        "--sweep-block-dim",
+        action="store_true",
+        help="Time closest-hit at block_dim in {64,128,256,512}",
+    )
     parser.add_argument(
         "--simplify",
         type=float,
@@ -311,12 +322,14 @@ def main() -> None:
         bvh_constructor=args.bvh,
         merge_static=args.merge_static,
         robot_first=args.robot_first,
+        cube_first=args.cube_first,
         simplify_factor=args.simplify,
     )
     n_static = stats["n_static"]
     mesh_pos, mesh_quat = expand_poses(
         args.n, g1_pos, g1_quat, n_static, robot_first=args.robot_first
     )
+    raycaster.block_dim = int(args.block_dim)
 
     cam_pos_np, cam_quat_np = sample_cameras(
         args.n,
@@ -342,7 +355,8 @@ def main() -> None:
     )
     print(f"N={args.n}  {args.width}x{args.height} ({n_rays} rays)  fov={args.fov}  max_dist={args.max_dist}")
     print(f"bvh={stats['bvh_constructor']}  merge_static={stats['merge_static']}  "
-          f"robot_first={stats['robot_first']}  simplify={stats['simplify_factor']}")
+          f"robot_first={stats['robot_first']}  cube_first={stats['cube_first']}  "
+          f"simplify={stats['simplify_factor']}  block_dim={raycaster.block_dim}")
     print(raycaster)
 
     kwargs = dict(
@@ -432,14 +446,15 @@ def main() -> None:
 
     results = []
 
-    def add_result(name: str, fn) -> None:
+    def add_result(name: str, fn, *, n_queries: int | None = None) -> None:
         print(f"\nBenchmarking {name}...")
         timing = benchmark_fn(fn, args.warmup, args.iters, torch_device)
-        rays_per_s = (args.n * n_rays) / (timing["ms_per_iter"] / 1000.0)
-        row = {"name": name, "rays_per_s": float(rays_per_s), **timing}
+        q = n_rays if n_queries is None else n_queries
+        rays_per_s = (args.n * q) / (timing["ms_per_iter"] / 1000.0)
+        row = {"name": name, "rays_per_s": float(rays_per_s), "n_queries": int(args.n * q), **timing}
         results.append(row)
         print(
-            f"  {timing['ms_per_iter']:.3f} ms/iter  {rays_per_s/1e6:.2f} M rays/s  "
+            f"  {timing['ms_per_iter']:.3f} ms/iter  {rays_per_s/1e6:.2f} M queries/s  "
             f"peak {format_memory(timing['mem_peak'])}"
         )
 
@@ -475,6 +490,7 @@ def main() -> None:
                 bvh_constructor=ctor,
                 merge_static=args.merge_static,
                 robot_first=args.robot_first,
+                cube_first=args.cube_first,
                 simplify_factor=args.simplify,
             )
             print(f"  {rc}")
@@ -493,6 +509,18 @@ def main() -> None:
                 f"lidar_fused_bvh_{ctor}",
                 lambda rc=rc, kw=kw: rc.raycast_fused(**kw, closest_hit=True),
             )
+
+    if args.sweep_block_dim:
+        saved = raycaster.block_dim
+        for bd in (64, 128, 256, 512):
+            if bd == saved:
+                continue
+            raycaster.block_dim = bd
+            add_result(
+                f"lidar_fused_block_{bd}",
+                lambda: raycaster.raycast_fused(**kwargs, closest_hit=True),
+            )
+        raycaster.block_dim = saved
 
     if args.proximity:
         if not raycaster.initialized:
@@ -577,13 +605,13 @@ def main() -> None:
         del pos_pl, dist_pl, pos_pc, dist_pc
         torch.cuda.empty_cache()
         torch.cuda.synchronize(torch_device)
-        add_result("proximity_closest", launch_prox_closest)
-        add_result("proximity_legacy", launch_prox_legacy)
+        add_result("proximity_closest", launch_prox_closest, n_queries=args.n_probes)
+        add_result("proximity_legacy", launch_prox_legacy, n_queries=args.n_probes)
 
     print("\n" + "=" * 70)
     print("RESULTS")
     print("=" * 70)
-    print(f"{'name':<24} {'ms/iter':>10} {'M rays/s':>10} {'peak mem':>12}")
+    print(f"{'name':<24} {'ms/iter':>10} {'M q/s':>10} {'peak mem':>12}")
     for row in results:
         print(
             f"{row['name']:<24} {row['ms_per_iter']:10.3f} {row['rays_per_s']/1e6:10.2f} "
@@ -610,6 +638,7 @@ def main() -> None:
                 "bvh_constructor",
                 "merge_static",
                 "robot_first",
+                "cube_first",
                 "simplify_factor",
             )
         },
