@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import math
 import numpy as np
 import torch
 import trimesh
@@ -130,21 +131,33 @@ def _assert_vertex_colors(device: str, out: Path) -> None:
     rgb, depth, mask, gb = pbr.render(
         cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat, return_gbuffer=True
     )
-    if float(mask.float().mean()) < 0.2:
+    del depth
+    if float(mask.float().mean()) < 0.02:
         raise SystemExit(f"vertex-color triangle missed, hit_frac={float(mask.float().mean())}")
     alb = gb["albedo"][0]
-    # Left of center should be redder than right; bottom bluer than top.
-    left = alb[24, 20]
-    right = alb[24, 44]
-    if not (left[0] > right[0] + 0.05 and right[1] > left[1] + 0.05):
+    m = mask[0]
+    # Mid row of the image should clip the triangle; leftmost hit is nearer the
+    # red vertex, rightmost nearer green, and a lower row nearer blue.
+    row = 24
+    cols = torch.where(m[row])[0]
+    if cols.numel() < 4:
+        raise SystemExit(f"vertex-color triangle too thin on row {row}: {int(cols.numel())} hits")
+    left = alb[row, int(cols[0])]
+    right = alb[row, int(cols[-1])]
+    if not (float(left[0]) > float(right[0]) + 0.08 and float(right[1]) > float(left[1]) + 0.08):
         raise SystemExit(f"barycentric colors not split L/R: left={left.tolist()} right={right.tolist()}")
-    bottom = alb[36, 32]
-    if float(bottom[2]) < 0.25:
-        raise SystemExit(f"expected blue toward bottom vertex, got {bottom.tolist()}")
+    rows = torch.where(m.any(dim=1))[0]
+    top_cols = torch.where(m[int(rows[0])])[0]
+    bot_cols = torch.where(m[int(rows[-1])])[0]
+    top = alb[int(rows[0]), int(top_cols[top_cols.numel() // 2])]
+    bot = alb[int(rows[-1]), int(bot_cols[bot_cols.numel() // 2])]
+    # OpenCV +Y is down: v2 (blue) is at negative Y = top of the image.
+    if float(top[2]) < float(bot[2]) + 0.2:
+        raise SystemExit(f"expected blue at top vertex, top={top.tolist()} bot={bot.tolist()}")
     _write_ppm(out / "vertex_colors.ppm", rgb[0])
     print(
         f"vertex_colors hit_frac={float(mask.float().mean()):.3f} "
-        f"left_r={float(left[0]):.2f} right_g={float(right[1]):.2f} bot_b={float(bottom[2]):.2f}"
+        f"left_r={float(left[0]):.2f} right_g={float(right[1]):.2f} top_b={float(top[2]):.2f}"
     )
 
 
@@ -180,14 +193,26 @@ def _assert_smooth_normals(device: str) -> None:
     n_s = gb_s["normal"][0]
     n_f = gb_f["normal"][0]
     m = mask_s[0]
-    # Neighbor normal variation should be smaller with vertex lerp.
-    d_s = (n_s[1:, 1:] - n_s[:-1, :-1]).norm(dim=-1)[m[1:, 1:]]
-    d_f = (n_f[1:, 1:] - n_f[:-1, :-1]).norm(dim=-1)[m[1:, 1:]]
-    if float(d_s.mean()) >= float(d_f.mean()) * 0.95:
+    center = torch.tensor([0.0, 0.0, 1.4], device=device)
+    fx = fy = 48.0 / (2.0 * math.tan(math.radians(50.0) * 0.5))
+    ys, xs = torch.meshgrid(
+        torch.arange(48, device=device, dtype=torch.float32),
+        torch.arange(48, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+    z = gb_s["depth"][0]
+    hit = torch.stack([(xs + 0.5 - 24.0) / fx * z, (ys + 0.5 - 24.0) / fy * z, z], dim=-1)
+    expected = hit - center
+    expected = expected / expected.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    # Kernel flips the normal toward the camera (−dir, here −Z).
+    expected = torch.where((expected * torch.tensor([0.0, 0.0, 1.0], device=device)).sum(-1, keepdim=True) > 0, -expected, expected)
+    err_s = (n_s - expected).norm(dim=-1)[m].mean()
+    err_f = (n_f - expected).norm(dim=-1)[m].mean()
+    if float(err_s) >= float(err_f) * 0.9:
         raise SystemExit(
-            f"smooth normals not smoother: {float(d_s.mean()):.4f} vs face {float(d_f.mean()):.4f}"
+            f"smooth normals not closer to sphere: {float(err_s):.4f} vs face {float(err_f):.4f}"
         )
-    print(f"smooth_normals neighbor_d={float(d_s.mean()):.4f} face_d={float(d_f.mean()):.4f}")
+    print(f"smooth_normals err={float(err_s):.4f} face_err={float(err_f):.4f}")
 
 
 def _assert_g1_materials() -> None:

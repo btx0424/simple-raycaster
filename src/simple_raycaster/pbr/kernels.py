@@ -69,9 +69,11 @@ def raycast_gbuffer_kernel(
         result = wp.mesh_query_ray(meshes[m], ray_o_b, ray_d_b, best_t)
         if result.result and result.t >= near and result.t < best_t:
             best_t = result.t
-            bu = result.u
-            bv = result.v
-            bw = float(1.0) - bu - bv
+            # Warp 1.6 mesh_query_ray: hit = u*v0 + v*v1 + (1-u-v)*v2
+            # (not the mesh_eval_position convention).
+            w0 = result.u
+            w1 = result.v
+            w2 = float(1.0) - w0 - w1
             face = result.face
             mid = meshes[m]
             i0 = wp.mesh_get_index(mid, face * 3 + 0)
@@ -79,15 +81,15 @@ def raycast_gbuffer_kernel(
             i2 = wp.mesh_get_index(mid, face * 3 + 2)
             base = vert_offset[m]
             best_albedo = (
-                vert_colors[base + i0] * bw
-                + vert_colors[base + i1] * bu
-                + vert_colors[base + i2] * bv
+                vert_colors[base + i0] * w0
+                + vert_colors[base + i1] * w1
+                + vert_colors[base + i2] * w2
             )
             if use_smooth != 0:
                 n_local = (
-                    vert_normals[base + i0] * bw
-                    + vert_normals[base + i1] * bu
-                    + vert_normals[base + i2] * bv
+                    vert_normals[base + i0] * w0
+                    + vert_normals[base + i1] * w1
+                    + vert_normals[base + i2] * w2
                 )
                 nlen = wp.length(n_local)
                 if nlen > 1.0e-8:
