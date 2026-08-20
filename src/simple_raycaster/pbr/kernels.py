@@ -69,7 +69,8 @@ def raycast_gbuffer_kernel(
         result = wp.mesh_query_ray(meshes[m], ray_o_b, ray_d_b, best_t)
         if result.result and result.t >= near and result.t < best_t:
             best_t = result.t
-            # Warp 1.6 mesh_query_ray: hit = u*v0 + v*v1 + (1-u-v)*v2
+            # Barycentric weights for mesh_query_ray (Warp ≥1.6):
+            # hit = u*v0 + v*v1 + (1-u-v)*v2 — not the mesh_eval_position convention.
             # (not the mesh_eval_position convention).
             w0 = result.u
             w1 = result.v

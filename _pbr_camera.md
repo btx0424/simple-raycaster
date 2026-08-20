@@ -104,7 +104,9 @@ _pbr_camera.md         # this file
 
 Scene matches `scripts/bench_g1_camera.py`: ground + cube + G1 Inspire
 (61 meshes, standing free-joint, 3 cm foot clearance), OpenCV 128×96,
-fov 70°, `far=10`. Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
+fov 70°, `far=10`. **Warp 1.16.0**, torch 2.8.0+cu128. Depth max|Δ| vs
+Lambert = 0. (Rounds 1–3 below were recorded on Warp **1.6.0**; Round 4
+re-benches the same scripts after upgrading.)
 
 **Headline batch is N=256** (parallel RL). Re-run:
 
@@ -112,9 +114,39 @@ fov 70°, `far=10`. Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
 .venv/bin/python scripts/bench_pbr_camera.py              # N=256 fast
 .venv/bin/python scripts/bench_pbr_camera.py --pretty
 .venv/bin/python scripts/probe_pbr_opt.py --json-out /tmp/probe_pbr_opt.json
+.venv/bin/python scripts/probe_pbr_compile.py --json-out /tmp/probe_compile.json
 ```
 
-### Round 1 (shade_fast default) — N=256
+### Round 4 — Warp 1.16.0 re-bench (N=256)
+
+Same scene / scripts as Round 1–3. Warp raycast got clearly faster; Torch
+shade is unchanged (as expected).
+
+| path | ms/iter (1.16) | was (1.6) | Δ |
+| --- | ---: | ---: | ---: |
+| lambert | **3.56** | 5.54 | −36% |
+| pbr_gbuffer | **3.59** | 5.56 | −35% |
+| pbr_nofxaa | 12.63 | 14.65 | −14% |
+| **pbr_fast** | **15.48** | 17.40 | −11% |
+| pbr_pretty (SSAO+smap128) | **21.79** | 24.42 | −11% |
+
+vs Lambert rose to **4.35×** for pbr_fast because Lambert sped up more than
+shade. Absolute pbr_fast is still better (~15.5 vs ~17.4 ms).
+
+Shadows (+ms over none, fidelity unchanged):
+
+| method | +ms (1.16) | was (1.6) | IoU vs sray |
+| --- | ---: | ---: | ---: |
+| contact | +4.2 | +4.4 | 0.08 |
+| smap128 | +4.5 | +5.5 | 0.78 |
+| smap256 | +12.8 | +15.1 | 0.87 |
+| **sray** | **+3.0** | +4.9 | 1.00 |
+
+Graphs still ~1.02×. ``torch.compile`` shade numbers match Round 3
+(~1.56× shade+FXAA; ~6× shade no-FXAA). Rough full-frame with compile:
+G-buffer ~3.6 + compiled shade+FXAA ~7.6 ≈ **~11 ms**.
+
+### Round 1 (shade_fast default, Warp 1.6) — N=256
 
 | path | ms/iter | ms/cam | cam/s | vs Lambert | peak |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -127,7 +159,7 @@ fov 70°, `far=10`. Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
 `pbr_fast` = GGX + HDRI + ACES + FXAA. Round-1 `pretty` was SSAO + contact.
 Gating SSAO/contact saved **~6 ms** at N=256. FXAA alone is ~2.7 ms.
 
-### Round 2 — shadows + graphs (N=256)
+### Round 2 — shadows + graphs (Warp 1.6, N=256)
 
 Probe: `scripts/probe_pbr_opt.py`. Shadow-ray visibility is the reference.
 
@@ -154,7 +186,7 @@ this res/N. Skip contact-as-shadow; do not stack contact+map.
 Not worth productizing at the RL headline batch — launch overhead is already
 amortized. (Earlier lidar notes: graphs help small N ~1.1×, ~0% at large N.)
 
-Round-2 `pretty` = SSAO + **smap128** (refreshed bench):
+Round-2 `pretty` = SSAO + **smap128** (refreshed bench on Warp 1.6):
 
 | path | ms/iter | vs Lambert | peak |
 | --- | ---: | ---: | --- |
@@ -163,7 +195,7 @@ Round-2 `pretty` = SSAO + **smap128** (refreshed bench):
 
 Similar cost to old SSAO+contact pretty (~23.5), with real shadows.
 
-### Round 3 — ``torch.compile`` on shade (N=256)
+### Round 3 — ``torch.compile`` on shade (Warp 1.6 / still valid on 1.16)
 
 Probe: `scripts/probe_pbr_compile.py` (frozen G-buffer; Warp out of the
 compiled region). Eager shade+FXAA **11.78 ms**; shade without FXAA **8.97 ms**.
@@ -179,9 +211,9 @@ MAE vs eager ~2e-7. Compile+warmup ~9–52 s (max-autotune longest).
 
 **Compile verdict:** worth it for the Torch shade path. Best mode here is
 ``max-autotune-no-cudagraphs``. FXAA still dominates after compile (~6 ms of
-the 7.6 ms stack); shade+IBL alone collapses to ~1.5 ms. Rough full-frame
-estimate: G-buffer ~5.5 + compiled shade+FXAA ~7.6 ≈ **~13 ms** (~1.3× vs
-eager pbr_fast ~17.4), or **~7 ms** if FXAA is off (~1.3× Lambert).
+the 7.6 ms stack); shade+IBL alone collapses to ~1.5 ms. On Warp 1.16,
+rough full-frame with compile: G-buffer ~3.6 + compiled shade+FXAA ~7.6 ≈
+**~11 ms**, or **~5 ms** if FXAA is off (~1.4× Lambert).
 
 Not productized in `RaycastPBRCamera` yet — wire as an optional
 ``compile_shade=True`` / mode knob when integrating.
@@ -189,7 +221,7 @@ Not productized in `RaycastPBRCamera` yet — wire as an optional
 ### Next iteration candidates
 
 - Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``).
-- FXAA opt-in / pretty-only if RL does not need silhouette AA (~2.7 ms eager,
-  still ~6 ms inside compiled shade+FXAA).
+- FXAA opt-in / pretty-only if RL does not need silhouette AA.
+- Warp tile FXAA/SSAO now that the host is on 1.16 (tile API mature).
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
 - Shadow rays as optional pretty mode when light moves every frame (no map rebuild).
