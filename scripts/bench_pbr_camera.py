@@ -80,7 +80,6 @@ def _make_pbr(args, device: str, env: EnvironmentHDRI, **overrides) -> RaycastPB
         device=device,
         hdri=env,
         quality="fast",
-        shadow_map_enabled=False,
         shadow_rays=False,
     )
     kw.update(overrides)
@@ -118,9 +117,13 @@ def main() -> None:
     parser.add_argument(
         "--pretty",
         action="store_true",
-        help="Also time quality=pretty (SSAO + contact, 4-tap)",
+        help="Also time quality=pretty (SSAO + 128² shadow map)",
     )
-    parser.add_argument("--shadow-map", action="store_true", help="Also time 256² sun shadow map")
+    parser.add_argument(
+        "--shadow-map",
+        action="store_true",
+        help="Also time pretty with shadow_map_size=256 (pretty already uses 128²)",
+    )
     parser.add_argument("--shadow-rays", action="store_true", help="Also time closest-hit sun shadow rays")
     parser.add_argument("--json-out", type=str, default="")
     args = parser.parse_args()
@@ -169,7 +172,9 @@ def main() -> None:
     pbr_smap = None
     pbr_sray = None
     if args.shadow_map:
-        pbr_smap = _make_pbr(args, device, env, quality="pretty", shadow_map_enabled=True)
+        pbr_smap = _make_pbr(
+            args, device, env, quality="pretty", shadow_map_enabled=True, shadow_map_size=256
+        )
         pbr_smap.bind_meshes(raycaster, names=names)
     if args.shadow_rays:
         pbr_sray = _make_pbr(

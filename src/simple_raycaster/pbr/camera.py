@@ -25,9 +25,10 @@ class RaycastPBRCamera:
     the same ``(rgb, depth, mask)`` shapes so it can be A/B'd against Lambert.
     RGB is ACES-tonemapped LDR; linear HDR is available via ``return_hdr=True``.
 
-    Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA (no SSAO / contact).
-    Use ``quality="pretty"`` for dumps / viewers (SSAO + contact shadows).
-    Shadow map and shadow rays stay opt-in debug/pretty knobs.
+    Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA (no SSAO / shadows).
+    Use ``quality="pretty"`` for dumps / viewers (SSAO + 128² sun shadow map).
+    Contact shadows and shadow rays stay opt-in; contact alone is a poor
+    shadow proxy (see ``_pbr_camera.md`` probe).
     """
 
     def __init__(
@@ -47,6 +48,7 @@ class RaycastPBRCamera:
         default_metallic: float = 0.05,
         sun_dir: tuple[float, float, float] = (0.45, -0.35, 0.82),
         sun_intensity: float = 2.5,
+        sun_color: tuple[float, float, float] = (1.0, 0.98, 0.92),
         exposure: float = 0.85,
         quality: str = "fast",
         ssao_enabled: bool | None = None,
@@ -55,8 +57,8 @@ class RaycastPBRCamera:
         contact_shadow_length: float = 0.08,
         fxaa_enabled: bool = True,
         smooth_normals: bool = True,
-        shadow_map_enabled: bool = False,
-        shadow_map_size: int = 256,
+        shadow_map_enabled: bool | None = None,
+        shadow_map_size: int = 128,
         shadow_map_extent: float = 2.0,
         shadow_map_catch: float = 4.0,
         shadow_rays: bool = False,
@@ -69,7 +71,10 @@ class RaycastPBRCamera:
         if ssao_enabled is None:
             ssao_enabled = pretty
         if contact_shadows_enabled is None:
-            contact_shadows_enabled = pretty
+            # Contact ≠ real shadows; keep off unless explicitly requested.
+            contact_shadows_enabled = False
+        if shadow_map_enabled is None:
+            shadow_map_enabled = pretty
 
         self.geom = RaycastCamera(
             width,
@@ -87,6 +92,7 @@ class RaycastPBRCamera:
         self.default_metallic = float(default_metallic)
         self.sun_dir = tuple(float(x) for x in sun_dir)
         self.sun_intensity = float(sun_intensity)
+        self.sun_color = tuple(float(x) for x in sun_color)
         self.exposure = float(exposure)
         self.ssao_enabled = bool(ssao_enabled)
         self.ssao_radius = float(ssao_radius)
@@ -123,6 +129,13 @@ class RaycastPBRCamera:
                 hdri if hdri is not None else default_hdri_path(),
                 device=self.geom.torch_device,
             )
+        # Cached for CUDA-graph-safe shade (no host torch.tensor during capture).
+        self._sun_dir_t = torch.tensor(
+            self.sun_dir, device=self.geom.torch_device, dtype=torch.float32
+        )
+        self._sun_color_t = torch.tensor(
+            self.sun_color, device=self.geom.torch_device, dtype=torch.float32
+        )
 
     @property
     def intrinsics(self) -> CameraIntrinsics:
@@ -538,7 +551,7 @@ class RaycastPBRCamera:
             fov_y_deg=fov_y_deg,
         )
         if light_dir is None:
-            sun = torch.tensor(self.sun_dir, device=self.geom.torch_device, dtype=torch.float32)
+            sun = self._sun_dir_t
         elif isinstance(light_dir, torch.Tensor):
             sun = light_dir.to(device=self.geom.torch_device, dtype=torch.float32).reshape(3)
         else:
@@ -597,6 +610,7 @@ class RaycastPBRCamera:
             self.env,
             sun_dir_w=sun,
             sun_intensity=self.sun_intensity,
+            sun_color=self._sun_color_t,
             sun_visibility=vis,
         )
         bg = self.env.sample(-gb["view"], roughness=0.0)

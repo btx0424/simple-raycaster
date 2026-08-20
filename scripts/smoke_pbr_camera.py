@@ -469,8 +469,6 @@ def _maybe_g1_preview(
         device=device,
         quality="pretty",
         ssao_radius=0.08,
-        shadow_map_enabled=False,
-        shadow_map_size=256,
         shadow_map_extent=2.2,
     )
     alb = None

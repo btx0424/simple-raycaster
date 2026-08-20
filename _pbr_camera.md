@@ -47,25 +47,26 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
 ## Phase 2 — cheap local occlusion (pretty mode)
 
 - [x] Screen-space **contact shadows** along the sun in the depth image
-      (sun term only). **Off in ``quality="fast"``** (RL default); on in
-      ``quality="pretty"``.
-- [x] SSAO radius default **0.08 m**, **4 taps** (was 8). Pretty-only.
+      (sun term only). **Opt-in only** — not a good shadow proxy (see Round 2).
+- [x] SSAO radius default **0.08 m**, **4 taps**. Pretty-only.
 
-## Phase 3 — optional visibility (pretty mode only)
+## Phase 3 — optional visibility
 
-- [x] Sun **shadow map**: directional ortho, default **256²**, all bound
-      meshes. Off by default (`shadow_map_enabled=False`).
-- [x] True shadow ray toward the sun: debug knob, default **off**
-      (`shadow_rays=False`).
+- [x] Sun **shadow map**: directional ortho, default **128²** (was 256).
+      On in ``quality="pretty"``; off in ``fast``.
+- [x] True shadow ray toward the sun: debug / GT knob
+      (`shadow_rays=False` by default).
 
 ## Quality presets
 
-| `quality` | SSAO | contact | FXAA | Use |
-| --- | --- | --- | --- | --- |
-| `"fast"` (default) | off | off | on | parallel RL / train RGB |
-| `"pretty"` | on (4-tap) | on | on | dumps / viewer |
+| `quality` | SSAO | shadow map | contact | FXAA | Use |
+| --- | --- | --- | --- | --- | --- |
+| `"fast"` (default) | off | off | off | on | parallel RL / train RGB |
+| `"pretty"` | on (4-tap) | **128²** | off | on | dumps / viewer |
 
-Explicit `ssao_enabled=` / `contact_shadows_enabled=` still override the preset.
+Explicit `ssao_enabled=` / `shadow_map_enabled=` / `contact_shadows_enabled=`
+still override the preset. Prefer **shadow rays** over stacking contact+map
+when you need GT-quality visibility at similar cost (see Round 2).
 
 ## Real2sim (later)
 
@@ -87,6 +88,7 @@ src/simple_raycaster/pbr/
   assets/README.md
 scripts/smoke_pbr_camera.py
 scripts/bench_pbr_camera.py
+scripts/probe_pbr_opt.py   # shadow fidelity + CUDA graph probes
 _pbr_camera.md         # this file
 ```
 
@@ -104,7 +106,7 @@ fov 70°, `far=10`. Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
 ```
 .venv/bin/python scripts/bench_pbr_camera.py              # N=256 fast
 .venv/bin/python scripts/bench_pbr_camera.py --pretty
-.venv/bin/python scripts/bench_pbr_camera.py --n 64,256,512 --pretty
+.venv/bin/python scripts/probe_pbr_opt.py --json-out /tmp/probe_pbr_opt.json
 ```
 
 ### Round 1 (shade_fast default) — N=256
@@ -115,18 +117,49 @@ fov 70°, `far=10`. Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
 | pbr_gbuffer | 5.56 | 0.022 | 46.0k | 1.00× | 232 MB |
 | pbr_nofxaa | 14.65 | 0.057 | 17.5k | 2.65× | 1.07 GB |
 | **pbr_fast** (default) | **17.40** | **0.068** | **14.7k** | **3.14×** | 1.22 GB |
-| pbr_pretty | 23.51 | 0.092 | 10.9k | 4.25× | 1.36 GB |
+| pbr_pretty (SSAO+contact) | 23.51 | 0.092 | 10.9k | 4.25× | 1.36 GB |
 
-`pbr_fast` = GGX + HDRI + ACES + FXAA. `pbr_pretty` adds 4-tap SSAO + contact.
-Gating SSAO/contact saves **~6 ms** at N=256 (~26% of pretty). FXAA alone is
-~2.7 ms at this batch (nofxaa → fast).
+`pbr_fast` = GGX + HDRI + ACES + FXAA. Round-1 `pretty` was SSAO + contact.
+Gating SSAO/contact saved **~6 ms** at N=256. FXAA alone is ~2.7 ms.
 
-Prior (pre-round-1) “default” with SSAO+contact+8-tap was ~19.6 ms at N=256
-on an earlier sunk-pose scene; do not compare absolute ms across scene
-revisions — use the table above.
+### Round 2 — shadows + graphs (N=256)
+
+Probe: `scripts/probe_pbr_opt.py`. Shadow-ray visibility is the reference.
+
+| method | +ms vs none | dark IoU vs sray | corr |
+| --- | ---: | ---: | ---: |
+| contact | +4.4 | 0.08 | 0.11 |
+| **smap128** | **+5.5** | **0.78** | **0.87** |
+| smap256 | +15.1 | 0.87 | 0.93 |
+| **sray** | **+4.9** | **1.00** | **1.00** |
+| contact+smap256 | +19.4 | 0.27 | 0.60 |
+
+**Shadows verdict:** use **128² shadow map** for pretty / viewer (default now),
+or **shadow rays** when you want GT visibility at similar cost to smap128 at
+this res/N. Skip contact-as-shadow; do not stack contact+map.
+
+**Graphs verdict** (after fixing host `torch.tensor` inside `shade_pbr`):
+
+| capture | speedup @ N=256 |
+| --- | ---: |
+| Warp graph on G-buffer | ~1.01× |
+| Torch CUDAGraph shade+FXAA | ~1.02× |
+| Torch CUDAGraph FXAA only | ~1.03× |
+
+Not worth productizing at the RL headline batch — launch overhead is already
+amortized. (Earlier lidar notes: graphs help small N ~1.1×, ~0% at large N.)
+
+Round-2 `pretty` = SSAO + **smap128** (refreshed bench):
+
+| path | ms/iter | vs Lambert | peak |
+| --- | ---: | ---: | --- |
+| pbr_fast | 17.65 | 3.23× | 1.22 GB |
+| **pbr_pretty** (SSAO+smap128) | **24.42** | **4.47×** | 1.41 GB |
+
+Similar cost to old SSAO+contact pretty (~23.5), with real shadows.
 
 ### Next iteration candidates
 
 - FXAA opt-in / pretty-only if RL does not need silhouette AA (~2.7 ms @256).
-- Fuse SSAO+contact into one Warp kernel (pretty path only).
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
+- Shadow rays as optional pretty mode when light moves every frame (no map rebuild).

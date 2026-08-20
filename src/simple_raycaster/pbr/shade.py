@@ -42,13 +42,16 @@ def shade_pbr(
     *,
     sun_dir_w: torch.Tensor,
     sun_intensity: float = 2.5,
-    sun_color: tuple[float, float, float] = (1.0, 0.98, 0.92),
+    sun_color: tuple[float, float, float] | torch.Tensor = (1.0, 0.98, 0.92),
     sun_visibility: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Linear HDR RGB. ``albedo/normal/view [... 3]``, ``roughness/metallic [...]``.
 
     ``sun_visibility`` (optional, ``[...]`` in ``[0,1]``) scales only the sun
     terms — IBL is unchanged. Contact shadows / shadow maps / shadow rays.
+
+    Pass ``sun_color`` as a device tensor if this path may run under a CUDA
+    graph (host ``torch.tensor(...)`` is illegal during capture).
     """
     n = normal_w / normal_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     v = view_w / view_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -72,7 +75,11 @@ def shade_pbr(
     spec_sun = spec_sun * n_dot_l.unsqueeze(-1)
 
     kd = (1.0 - f) * (1.0 - metallic.unsqueeze(-1))
-    sun = sun_intensity * torch.tensor(sun_color, device=albedo.device, dtype=albedo.dtype)
+    if isinstance(sun_color, torch.Tensor):
+        sun_rgb = sun_color.reshape(3)
+    else:
+        sun_rgb = torch.tensor(sun_color, device=albedo.device, dtype=albedo.dtype)
+    sun = sun_intensity * sun_rgb
     diff_sun = kd * albedo * (n_dot_l.unsqueeze(-1) / _PI)
 
     irr = env.irradiance(n)
