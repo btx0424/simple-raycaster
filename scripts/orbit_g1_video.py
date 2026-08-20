@@ -2,7 +2,7 @@
 
     .venv/bin/python scripts/orbit_g1_video.py
     .venv/bin/python scripts/orbit_g1_video.py --res 512x384 --frames 90 --hdri venice_sunset
-    .venv/bin/python scripts/orbit_g1_video.py --width 256 --height 192 --hdri studio_small
+    .venv/bin/python scripts/orbit_g1_video.py --width 192 --height 144 --hdri studio_small
 
 Outputs under ``scripts/_orbit_g1/`` (gitignored):
   orbit_depth.mp4, orbit_lambert.mp4, orbit_pbr.mp4, orbit_side_by_side.mp4

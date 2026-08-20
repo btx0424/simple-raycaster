@@ -550,8 +550,8 @@ def main() -> None:
     parser.add_argument(
         "--res",
         type=_parse_res,
-        default=None,
-        help="WxH shortcut (overrides --width/--height), e.g. 512x384",
+        default=(192, 144),
+        help="WxH for all cameras (default 192x144); overrides --width/--height",
     )
     parser.add_argument("--out", type=str, default="scripts/_pbr_smoke")
     args = parser.parse_args()
@@ -568,7 +568,7 @@ def main() -> None:
         if width < 16 or height < 16:
             raise SystemExit(f"resolution {width}x{height} is below 16x16")
     else:
-        width = height = None
+        width, height = 192, 144
 
     wp.init()
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -582,10 +582,7 @@ def main() -> None:
         raise SystemExit(f"unexpected HDRI shape {hdri.shape}")
     if float(hdri.max()) < 2.0:
         raise SystemExit("HDRI looks clipped (max < 2); need unclipped .hdr not a JPG")
-    if width is not None:
-        print(f"resolution override {width}x{height} (all cameras)")
-    else:
-        print("resolution defaults: box 64x48, sphere 48x48, shadows 96x64, g1 128x96")
+    print(f"resolution {width}x{height} (all cameras)")
 
     out = Path(args.out)
     size_kw = dict(width=width, height=height)

@@ -4,7 +4,7 @@ Shadow rays are treated as the visibility reference. Graphs: Warp capture of
 the G-buffer launch, and a Torch CUDAGraph of shade+FXAA on a frozen G-buffer.
 
     .venv/bin/python scripts/probe_pbr_opt.py
-    .venv/bin/python scripts/probe_pbr_opt.py --n 256 --width 128 --height 96
+    .venv/bin/python scripts/probe_pbr_opt.py --n 256 --width 192 --height 144
 """
 
 from __future__ import annotations

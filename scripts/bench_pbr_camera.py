@@ -105,8 +105,8 @@ def main() -> None:
         default=_parse_n_list("256"),
         help="Camera counts to time (default: 256, the RL headline batch)",
     )
-    parser.add_argument("--width", type=int, default=128)
-    parser.add_argument("--height", type=int, default=96)
+    parser.add_argument("--width", type=int, default=192)
+    parser.add_argument("--height", type=int, default=144)
     parser.add_argument("--fov", type=float, default=70.0)
     parser.add_argument("--min-dist", type=float, default=0.05)
     parser.add_argument("--max-dist", type=float, default=10.0)
