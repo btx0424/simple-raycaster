@@ -440,15 +440,12 @@ def _maybe_g1_preview(
         shadow_map_size=256,
         shadow_map_extent=2.2,
     )
-    pbr.bind_meshes(raycaster, names=names)
-    # Darker ground so white rubber feet read as resting on the plane.
+    alb = None
     if names is not None and raycaster.n_meshes >= 2:
-        alb = pbr.geom._albedo_t
-        assert alb is not None
-        alb = alb.clone()
-        alb[0] = torch.tensor([0.38, 0.38, 0.36], device=device)
-        alb[1] = torch.tensor([0.78, 0.28, 0.16], device=device)
-        pbr.bind_meshes(raycaster, names=names, albedos=alb)
+        alb = np.tile(np.array([0.65, 0.65, 0.65], dtype=np.float32), (raycaster.n_meshes, 1))
+        alb[0] = (0.38, 0.38, 0.36)  # darker ground — white feet read on top
+        alb[1] = (0.78, 0.28, 0.16)
+    pbr.bind_meshes(raycaster, names=names, albedos=alb)
     rgb, depth, mask = pbr.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
     _write_preview(out / "g1_pbr", rgb[0])
     print(
