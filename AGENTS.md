@@ -9,7 +9,7 @@ src/simple_raycaster/
   raycaster.py       # MultiMeshRaycaster (manual poses)
   raycaster_v2.py    # MultiMeshRaycasterV2 (Isaac entity poses)
   proximity.py       # MeshProximitySensor (closest-point / SDF-style queries)
-  raycast_camera.py  # RaycastCamera — Warp RGB-D megakernel
+  raycast_camera.py  # RaycastCamera — Lambert RGB-D megakernel (do not break for GS A/B)
   diffrast_camera.py # DiffrastCamera — nvdiffrast RGB-D (optional dep)
   mesh_cache.py      # CachedEntityMesh + simplify / pose helpers
   mesh_rgbd.py       # MeshRGBDRenderer factory (diffrast | raycast)
@@ -17,15 +17,28 @@ src/simple_raycaster/
   helpers.py         # trimesh→wp conversion, quat math, voxelize_* utilities
   utils_usd.py       # USD prim search + trimesh extraction
   utils_mjc.py       # MuJoCo body → trimesh extraction
+  pbr/               # Standalone PBR path (does not modify RaycastCamera)
+    camera.py        # RaycastPBRCamera — G-buffer + Torch shade / compile
+    ssgi_camera.py   # RaycastSSGICamera — tiled SSGI instead of SSAO
+    ssgi.py          # Warp tiled SSGI kernel
+    tiled_filters.py # Warp tiled FXAA / SSAO
+    shade.py         # GGX, SSAO, FXAA, ACES, shadows (Torch)
+    hdri.py          # EnvironmentHDRI + bundled maps under pbr/assets/
+    kernels.py       # G-buffer / shadow-map / shadow-ray Warp kernels
+    materials.py     # Per-mesh roughness/metallic + vertex packs
 scripts/
-  example.py         # end-to-end USD/MJCF demo
-  advanced.py        # perf / correctness benchmark
+  example.py / advanced.py
+  g1_assets.py       # Resolve G1 MJCF (env / --xml / relative) — no machine paths
+  smoke_pbr_camera.py, bench_pbr_camera.py, bench_tiled_filters.py, orbit_g1_video.py, …
+_pbr_camera.md       # PBR design notes + bench rounds (not user-facing README)
+_optimization.md     # Lidar / camera optimization plan
 ```
 
-Public exports include raycasters, `RaycastCamera`, `DiffrastCamera`,
+Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
+`RaycastSSGICamera`, `EnvironmentHDRI`, `DiffrastCamera`,
 `make_mesh_rgbd_renderer`, and mesh-cache helpers. Optional: `pip install .[diffrast]`.
 
-### Mesh RGB-D cameras (`raycast_camera.py` / `diffrast_camera.py`)
+### Mesh RGB-D cameras
 
 * Pinhole **RGB-D** mesh renderers for 3DGS composite in active-adaptation
   (`task.visual.mesh_renderer: diffrast|raycast`). AA only depth-composites.
@@ -34,6 +47,18 @@ Public exports include raycasters, `RaycastCamera`, `DiffrastCamera`,
 * Shared API shape: register / bind body-local meshes, then
   `render(cam_pos, cam_quat, …) → (rgb, depth, mask)` (OpenCV convention).
 * Prefer `make_mesh_rgbd_renderer("diffrast"|"raycast")` for multi-entity use.
+* **Hard rule:** do not change Lambert `RaycastCamera` / `raycast_camera_kernel`
+  behavior when extending PBR — keep it for GS compositing A/B.
+
+### PBR camera (`pbr/`)
+
+* `quality="fast"` — GGX + HDRI + ACES + FXAA (no SSAO / shadows).
+* `quality="pretty"` — adds SSAO + 128² sun shadow map (viewers / dumps).
+* Defaults (Round 7 @ 192×144): `compile_mode="max-autotune-no-cudagraphs"`,
+  `fxaa_impl="torch"`, `ssao_impl="torch"` (compiled shade+SSAO+FXAA graph).
+* No-compile path: `compile_mode=None, fxaa_impl="tiled"` (tiled SSAO still loses).
+* `RaycastSSGICamera` overrides `_compose_indirect`; SSGI knobs stay on the subclass.
+* Script default resolution is **192×144**. Headline RL batch is **N=256**.
 
 ## Which Raycaster to Use
 
@@ -87,6 +112,8 @@ Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays], hit_normals
 * **Warp init**: call `wp.init()` once in the process before first `wp.launch`.
 * **Mesh IDs**: `initialize()` builds `meshes_array` of `wp.uint64` mesh handles; any mesh add invalidates initialization (`initialized = False`).
 * **Static meshes in V2**: geometry must already be in world frame in the trimesh data; runtime pose is identity.
+* **G1 assets**: never hardcode machine paths. Use `scripts/g1_assets.py`
+  (`SIMPLE_RAYCASTER_G1_XML`, `--xml`, or `assets/unitree_g1/…`).
 * **Style**: 4-space indent, type hints on public APIs (`jaxtyping` shapes in docstrings), keep docstrings focused on non-obvious behavior.
 
 ## Common Pitfalls
@@ -96,12 +123,13 @@ Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays], hit_normals
 3. **USD import timing** — `from pxr import Usd` fails before Isaac `AppLauncher` unless standalone `usd-core` is installed.
 4. **Empty raycast** — raycasting with zero registered meshes raises in `_get_mesh_poses_w`.
 5. **Selective indices shape** — with `mesh_indices`, pose tensors and indices must share the same `[N, n_subset]` mesh dimension.
+6. **Editing Lambert camera for PBR** — put PBR work under `pbr/`; leave `raycast_camera.py` kernels alone unless fixing a shared bug.
 
 ## Warp versioning
 
 Declare `warp-lang>=1.7,<2` in `pyproject.toml`. **Do not** add a 1.x upper bound (`<1.13` etc.). Isaac Sim 5.1, mjlab, and Isaac Sim 6 ship different Warp 1.x releases in the same process as this library; an upper bound makes the package uninstallable in newer stacks. Host `pyproject.toml` files pin the exact Warp. Optional extras per Warp version are not useful — a venv can have only one `warp-lang`.
 
-When adopting a Warp feature that needs a newer minimum (cuBQL BVH, graph capture, …), raise the **floor** (`>=1.13`) and note which host stacks that drops.
+When adopting a Warp feature that needs a newer minimum (cuBQL BVH, graph capture, …), raise the **floor** (`>=1.13`) and note which host stacks that drops. Tiled FXAA/SSGI need Warp **1.16**-class `wp.launch_tiled` / shared tiles.
 
 ## Build & Validation Commands
 
@@ -114,9 +142,16 @@ python scripts/example.py --mjcf path/to/scene.xml
 
 # Kernel strategy benchmark (synthetic scene, no USD/MJCF file)
 python scripts/advanced.py
+
+# PBR smoke (skips G1 preview if MJCF unresolved)
+python scripts/smoke_pbr_camera.py
+
+# G1 benches / orbit (need SIMPLE_RAYCASTER_G1_XML or assets/)
+python scripts/bench_pbr_camera.py
+python scripts/orbit_g1_video.py --frames 36
 ```
 
-There is no `tests/` suite yet. When changing kernels or pose gathering, run `scripts/advanced.py` for numerical parity and prefer adding a small reproducible script snippet to PR notes.
+There is no `tests/` suite yet. When changing kernels or pose gathering, run `scripts/advanced.py` for numerical parity and prefer adding a small reproducible script snippet to PR notes. For PBR, run `smoke_pbr_camera.py` and note PNG paths under `scripts/_pbr_smoke/` (gitignored).
 
 ## Making Changes Safely
 
@@ -124,6 +159,7 @@ There is no `tests/` suite yet. When changing kernels or pose gathering, run `sc
 * **V2 registration** — if adding a new registration path, append to `self.entities`, load meshes, then call `_validate_registration()`.
 * **Performance** — prefer `raycast_fused` for fewer intermediate buffers; both methods run on GPU in normal use.
 * **New mesh sources** — add extraction in `utils_*.py`, wire through `MultiMeshRaycaster` factories first; only add V2 support if poses can be sourced automatically.
+* **PBR** — prefer subclassing / `_compose_indirect` hooks over growing `RaycastPBRCamera` kwargs; keep SSGI knobs on `RaycastSSGICamera`.
 
 ## Planned Improvements (Warp Changelog)
 
@@ -209,5 +245,6 @@ When implementing, extend `scripts/advanced.py` to compare old vs new paths and 
 Keep commit subjects short and imperative (see repo history). PRs should list:
 
 * which raycaster class / kernel path changed
-* validation command run (`scripts/example.py` or `scripts/advanced.py`)
+* validation command run (`scripts/example.py`, `scripts/advanced.py`, or `scripts/smoke_pbr_camera.py`)
 * Isaac Sim version if V2 behavior changed
+* for PBR: Warp / Torch versions and whether compile defaults were exercised

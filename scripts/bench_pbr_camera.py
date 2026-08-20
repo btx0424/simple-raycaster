@@ -27,7 +27,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from bench_g1_camera import (  # noqa: E402
-    DEFAULT_G1_XML,
+    resolve_g1_xml,
     benchmark_fn,
     expand_poses,
     format_memory,
@@ -98,7 +98,7 @@ def _clear_work(cam) -> None:
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--xml", type=str, default=DEFAULT_G1_XML)
+    parser.add_argument("--xml", type=str, default=None, help="G1 MJCF (or SIMPLE_RAYCASTER_G1_XML)")
     parser.add_argument(
         "--n",
         type=_parse_n_list,
@@ -135,7 +135,7 @@ def main() -> None:
     n_pix = args.width * args.height
 
     wp.init()
-    raycaster, g1_pos, g1_quat, stats = load_scene(args.xml, device)
+    raycaster, g1_pos, g1_quat, stats = load_scene(str(resolve_g1_xml(args.xml)), device)
     n_static = stats["n_static"]
     names = _scene_names(stats)
 

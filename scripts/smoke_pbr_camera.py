@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import struct
+import sys
 import zlib
 from pathlib import Path
 
@@ -21,10 +22,11 @@ from simple_raycaster.pbr.hdri import load_radiance_hdr
 from simple_raycaster.pbr.materials import g1_roughness_metallic, materials_for_names
 from simple_raycaster.pbr.shade import fxaa
 
-G1_XML = (
-    "/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/"
-    "g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml"
-)
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from g1_assets import find_g1_xml  # noqa: E402
 
 
 def _parse_res(raw: str) -> tuple[int, int]:
@@ -445,9 +447,9 @@ def _assert_contact_and_shadows(
 def _maybe_g1_preview(
     device: str, out: Path, *, width: int | None = None, height: int | None = None
 ) -> None:
-    xml = Path(G1_XML)
-    if not xml.is_file():
-        print(f"skip g1 preview (missing {xml})")
+    xml = find_g1_xml()
+    if xml is None:
+        print("skip g1 preview (set SIMPLE_RAYCASTER_G1_XML or pass assets under assets/unitree_g1/)")
         return
     import importlib.util
 

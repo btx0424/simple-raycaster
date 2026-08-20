@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 
 import mujoco
@@ -28,10 +29,16 @@ from simple_raycaster.kernels import (
     transform_and_query_point_kernel,
 )
 
-DEFAULT_G1_XML = (
-    "/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/"
-    "g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml"
-)
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from g1_assets import find_g1_xml, resolve_g1_xml
+
+__all__ = ["find_g1_xml", "resolve_g1_xml", "DEFAULT_G1_XML"]
+
+# Back-compat for ``from bench_g1_camera import DEFAULT_G1_XML``.
+DEFAULT_G1_XML = str(find_g1_xml() or "")
 
 
 def format_memory(nbytes: int) -> str:
@@ -308,7 +315,12 @@ def benchmark_fn(fn, warmup: int, iters: int, device: torch.device) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--xml", type=str, default=DEFAULT_G1_XML)
+    parser.add_argument(
+        "--xml",
+        type=str,
+        default=None,
+        help="G1 MJCF path (default: SIMPLE_RAYCASTER_G1_XML or assets/unitree_g1/...)",
+    )
     parser.add_argument("--n", type=int, default=64)
     parser.add_argument("--width", type=int, default=192)
     parser.add_argument("--height", type=int, default=144)
@@ -359,9 +371,10 @@ def main() -> None:
     device = args.device
     torch_device = torch.device(device)
 
+    xml_path = str(resolve_g1_xml(args.xml))
     wp.init()
     raycaster, g1_pos, g1_quat, stats = load_scene(
-        args.xml,
+        xml_path,
         device,
         bvh_constructor=args.bvh,
         merge_static=args.merge_static,
@@ -531,7 +544,7 @@ def main() -> None:
                 continue
             print(f"\nRebuilding scene bvh_constructor={ctor}...")
             rc, gp, gq, st = load_scene(
-                args.xml,
+                xml_path,
                 device,
                 bvh_constructor=ctor,
                 merge_static=args.merge_static,

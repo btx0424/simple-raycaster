@@ -30,7 +30,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from bench_g1_camera import (  # noqa: E402
-    DEFAULT_G1_XML,
+    resolve_g1_xml,
     expand_poses,
     load_scene,
     sample_cameras,
@@ -66,7 +66,7 @@ def _time_fn(fn, *, warmup: int, iters: int, device: torch.device) -> float:
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--xml", type=str, default=DEFAULT_G1_XML)
+    parser.add_argument("--xml", type=str, default=None, help="G1 MJCF (or SIMPLE_RAYCASTER_G1_XML)")
     parser.add_argument("--n", type=int, default=256)
     parser.add_argument("--width", type=int, default=192)
     parser.add_argument("--height", type=int, default=144)
@@ -97,7 +97,7 @@ def main() -> None:
     torch_device = torch.device(args.device)
     wp.init()
 
-    raycaster, g1_pos, g1_quat, stats = load_scene(args.xml, args.device)
+    raycaster, g1_pos, g1_quat, stats = load_scene(str(resolve_g1_xml(args.xml)), args.device)
     names = _scene_names(stats)
     env = EnvironmentHDRI.from_path(default_hdri_path(), device=torch_device)
 

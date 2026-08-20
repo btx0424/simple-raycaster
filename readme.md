@@ -7,6 +7,7 @@ Intended usage:
 * Lidar-style range sensors
 * Efficient depth / occupancy sensing
 * Voxelization of hit points (`helpers.voxelize_wp`)
+* Mesh RGB-D cameras (Lambert `RaycastCamera`, PBR `RaycastPBRCamera` / `RaycastSSGICamera`)
 
 ## Raycaster APIs
 
@@ -25,6 +26,18 @@ Use `device="cuda"` in production. `device="cpu"` is supported only for special 
 Quaternions are **WXYZ** (scalar first). Ray directions should be normalized. Misses return `max_dist` as the hit distance.
 
 Both methods return `(hit_positions, hit_distances, hit_normals)`. Normals are world-frame face normals at the closest hit; misses and disabled batch elements get zero normals.
+
+## RGB-D cameras
+
+| Class | Role |
+| --- | --- |
+| `RaycastCamera` | Lambert RGB-D megakernel (kept stable for GS compositing A/B). |
+| `RaycastPBRCamera` | Standalone G-buffer + PyTorch GGX / HDRI / ACES; optional SSAO, shadows, FXAA. |
+| `RaycastSSGICamera` | Same as PBR, but tiled SSGI replaces SSAO. |
+
+PBR defaults (192×144 benches): `compile_mode="max-autotune-no-cudagraphs"`, Torch FXAA/SSAO. Pass `compile_mode=None, fxaa_impl="tiled"` for the no-compile path. Design notes: `_pbr_camera.md`.
+
+Bundled HDRIs live under `src/simple_raycaster/pbr/assets/` (`studio`, `studio_small`, `venice_sunset` aliases via `resolve_hdri_path`).
 
 # Installation
 
@@ -90,6 +103,19 @@ hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
     min_dist=0.0,
     max_dist=10.0,
 )
+```
+
+## PBR camera (quick)
+
+```python
+import warp as wp
+from simple_raycaster import MultiMeshRaycaster, RaycastPBRCamera
+
+wp.init()
+raycaster = MultiMeshRaycaster([...], device="cuda")
+cam = RaycastPBRCamera(192, 144, device="cuda", quality="pretty")
+cam.bind_meshes(raycaster, names=[...], albedos=...)
+rgb, depth, mask = cam.render(cam_pos, cam_quat, mesh_pos_w=..., mesh_quat_w=...)
 ```
 
 ## Isaac Lab integration (`MultiMeshRaycasterV2`)
@@ -188,10 +214,18 @@ With V2, omit `mesh_pos` / `mesh_quat` and pass only rays plus optional `mesh_in
 
 * `scripts/example.py` — USD or MJCF scene, benchmark / visualize ray hits and voxels
 * `scripts/advanced.py` — compares fused vs non-fused kernels and independent vs combined mesh layouts
+* `scripts/smoke_pbr_camera.py` — PBR / SSGI / Lambert parity + PNG previews (default 192×144)
+* `scripts/bench_pbr_camera.py` — PBR N-sweep (headline N=256)
+* `scripts/bench_tiled_filters.py` — Torch eager / `torch.compile` vs Warp tiled FXAA/SSAO
+* `scripts/orbit_g1_video.py` — depth / Lambert / PBR orbit MP4s
+* `scripts/bench_g1_camera.py` — G1 lidar + camera scene benchmark
 
-Run:
+G1 MJCF is **not** vendored. Resolve it with (in order) `--xml`, env `SIMPLE_RAYCASTER_G1_XML`, or a file at `assets/unitree_g1/g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml` (also checks a sibling `../object_hoi/src/assets/unitree_g1/` layout). See `scripts/g1_assets.py`.
 
 ```bash
+export SIMPLE_RAYCASTER_G1_XML=/path/to/g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml
+python scripts/smoke_pbr_camera.py
+python scripts/orbit_g1_video.py --frames 72
 python scripts/example.py --usd path/to/scene.usd
 python scripts/example.py --mjcf path/to/scene.xml --benchmark
 ```

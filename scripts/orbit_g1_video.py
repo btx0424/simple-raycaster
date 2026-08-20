@@ -28,7 +28,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from bench_g1_camera import (  # noqa: E402
-    DEFAULT_G1_XML,
+    resolve_g1_xml,
     expand_poses,
     load_scene,
     look_at_opencv_wxyz,
@@ -154,7 +154,7 @@ class _FFmpegWriter:
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--xml", type=str, default=DEFAULT_G1_XML)
+    parser.add_argument("--xml", type=str, default=None, help="G1 MJCF (or SIMPLE_RAYCASTER_G1_XML)")
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument(
@@ -218,7 +218,7 @@ def main() -> None:
     wp.init()
     device = args.device
     torch_device = torch.device(device)
-    raycaster, g1_pos, g1_quat, stats = load_scene(args.xml, device)
+    raycaster, g1_pos, g1_quat, stats = load_scene(str(resolve_g1_xml(args.xml)), device)
     n_static = int(stats["n_static"])
     names = list(getattr(raycaster, "mesh_names", []) or [])
     if len(names) != raycaster.n_meshes:

@@ -168,7 +168,7 @@ Facts that the original stub did not spell out:
   planes and boxes in MJCF will not appear unless added as trimesh primitives.
   Bodies with geoms but no mesh geoms must be skipped (empty concatenate).
 
-Local Warp checkout under `/mnt/workspace/btx0424/references/warp` is **1.6**.
+Local Warp version: check ``wp.__version__`` in the active venv / Isaac process.
 Host stacks pin Warp independently (`pyproject.toml` floor is `>=1.7,<2`).
 Re-read the live
 [changelog](https://nvidia.github.io/warp/latest/user_guide/changelog.html)
@@ -185,13 +185,14 @@ Fixed geometry, randomized cameras and (optionally) robot pose.
 2. **Cube around origin** — `trimesh.creation.box` extents ~0.4–0.6 m, center
    near `(0.4, 0.0, 0.3)` so it sits in front of the robot, not inside the
    pelvis. Identity quat, or a small random yaw.
-3. **G1 at origin** — MJCF
-   `/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml`
-   Mesh dir is `.../unitree_g1/meshes/` (STLs are present; ~160 files). Load
-   via `mujoco.MjModel.from_xml_path` after setting `compiler meshdir` if the
-   XML does not already resolve `meshes/*.STL`. One `wp.Mesh` per body that
-   actually has mesh geoms (`from_MjModel` / `get_trimesh_from_body`).
-   Poses from `mj_forward` → `data.xpos` / `data.xquat` (WXYZ).
+3. **G1 at origin** — MJCF ``g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml``
+   (resolve via ``SIMPLE_RAYCASTER_G1_XML``, ``--xml``, or
+   ``assets/unitree_g1/``; see ``scripts/g1_assets.py``). Mesh dir is the
+   sibling ``meshes/`` folder. Load via `mujoco.MjModel.from_xml_path` after
+   setting `compiler meshdir` if the XML does not already resolve
+   `meshes/*.STL`. One `wp.Mesh` per body that actually has mesh geoms
+   (`from_MjModel` / `get_trimesh_from_body`). Poses from `mj_forward` →
+   `data.xpos` / `data.xquat` (WXYZ).
 
 **Poses**
 
