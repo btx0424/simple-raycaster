@@ -1,11 +1,16 @@
-"""Smoke: Lambert ``RaycastCamera`` vs new ``RaycastPBRCamera`` (untouched Lambert path)."""
+"""Smoke: Lambert ``RaycastCamera`` vs new ``RaycastPBRCamera`` (untouched Lambert path).
+
+    .venv/bin/python scripts/smoke_pbr_camera.py
+    .venv/bin/python scripts/smoke_pbr_camera.py --res 512x384
+"""
 
 from __future__ import annotations
 
-import math
+import argparse
 import struct
 import zlib
 from pathlib import Path
+
 import numpy as np
 import torch
 import trimesh
@@ -19,6 +24,26 @@ G1_XML = (
     "/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/"
     "g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml"
 )
+
+
+def _parse_res(raw: str) -> tuple[int, int]:
+    parts = raw.lower().replace(" ", "").split("x")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(f"expected WxH, got {raw!r}")
+    width, height = int(parts[0]), int(parts[1])
+    if width < 16 or height < 16:
+        raise argparse.ArgumentTypeError(f"resolution {width}x{height} is below 16x16")
+    return width, height
+
+
+def _size(
+    width: int | None, height: int | None, default_w: int, default_h: int
+) -> tuple[int, int]:
+    if width is None and height is None:
+        return default_w, default_h
+    if width is None or height is None:
+        raise ValueError("width and height must be set together")
+    return width, height
 
 
 def _as_u8_rgb(rgb: torch.Tensor) -> np.ndarray:
@@ -79,13 +104,17 @@ def _look_at_opencv(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=np.float32)
 
 
-def _assert_lambert_parity(device: str, out: Path) -> None:
+def _assert_lambert_parity(
+    device: str, out: Path, *, width: int | None = None, height: int | None = None
+) -> None:
+    w, h = _size(width, height, 64, 48)
+    cy, cx = h // 2, w // 2
     box = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
-    lambert = RaycastCamera(64, 48, fov_y_deg=70.0, convention="opencv", device=device)
+    lambert = RaycastCamera(w, h, fov_y_deg=70.0, convention="opencv", device=device)
     lambert.bind_trimeshes([box], albedos=[(0.9, 0.2, 0.15)])
     pbr = RaycastPBRCamera(
-        64,
-        48,
+        w,
+        h,
         fov_y_deg=70.0,
         convention="opencv",
         device=device,
@@ -121,23 +150,25 @@ def _assert_lambert_parity(device: str, out: Path) -> None:
     ddiff = (depth_l - depth_p).abs().max().item()
     if ddiff > 1e-4:
         raise SystemExit(f"depth mismatch vs Lambert max={ddiff}")
-    if not bool(mask_p[0, 24, 32]):
+    if not bool(mask_p[0, cy, cx]):
         raise SystemExit("expected a hit at the image center")
-    alb = gb["albedo"][0, 24, 32]
+    alb = gb["albedo"][0, cy, cx]
     if (alb - torch.tensor([0.9, 0.2, 0.15], device=device)).abs().max().item() > 1e-4:
         raise SystemExit(f"constant-albedo lerp failed: {alb.tolist()}")
 
     _write_preview(out / "lambert", rgb_l[0])
     _write_preview(out / "pbr", rgb_p[0])
     print(
-        f"parity hit_frac={float(mask_p.float().mean()):.3f} "
-        f"depth_center={float(depth_p[0, 24, 32]):.3f} depth_max_abs={ddiff:.2e} "
+        f"parity {w}x{h} hit_frac={float(mask_p.float().mean()):.3f} "
+        f"depth_center={float(depth_p[0, cy, cx]):.3f} depth_max_abs={ddiff:.2e} "
         f"lambert_rgb_mean={float(rgb_l[mask_l].mean()):.3f} "
         f"pbr_rgb_mean={float(rgb_p[mask_p].mean()):.3f}"
     )
 
 
-def _assert_vertex_colors(device: str, out: Path) -> None:
+def _assert_vertex_colors(
+    device: str, out: Path, *, width: int | None = None, height: int | None = None
+) -> None:
     """Three-vertex triangle: red / green / blue — barycentric lerp at center."""
     verts = np.array(
         [[-0.6, 0.5, 1.5], [0.6, 0.5, 1.5], [0.0, -0.5, 1.5]],
@@ -149,9 +180,10 @@ def _assert_vertex_colors(device: str, out: Path) -> None:
         [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]],
         dtype=np.uint8,
     )
+    w, h = _size(width, height, 64, 48)
     pbr = RaycastPBRCamera(
-        64,
-        48,
+        w,
+        h,
         fov_y_deg=70.0,
         convention="opencv",
         device=device,
@@ -173,7 +205,7 @@ def _assert_vertex_colors(device: str, out: Path) -> None:
     m = mask[0]
     # Mid row of the image should clip the triangle; leftmost hit is nearer the
     # red vertex, rightmost nearer green, and a lower row nearer blue.
-    row = 24
+    row = h // 2
     cols = torch.where(m[row])[0]
     if cols.numel() < 4:
         raise SystemExit(f"vertex-color triangle too thin on row {row}: {int(cols.numel())} hits")
@@ -191,16 +223,19 @@ def _assert_vertex_colors(device: str, out: Path) -> None:
         raise SystemExit(f"expected blue at top vertex, top={top.tolist()} bot={bot.tolist()}")
     _write_preview(out / "vertex_colors", rgb[0])
     print(
-        f"vertex_colors hit_frac={float(mask.float().mean()):.3f} "
+        f"vertex_colors {w}x{h} hit_frac={float(mask.float().mean()):.3f} "
         f"left_r={float(left[0]):.2f} right_g={float(right[1]):.2f} top_b={float(top[2]):.2f}"
     )
 
 
-def _assert_smooth_normals(device: str) -> None:
+def _assert_smooth_normals(
+    device: str, *, width: int | None = None, height: int | None = None
+) -> None:
     sphere = trimesh.creation.icosphere(subdivisions=2, radius=0.4)
+    w, h = _size(width, height, 48, 48)
     kwargs = dict(
-        width=48,
-        height=48,
+        width=w,
+        height=h,
         fov_y_deg=50.0,
         convention="opencv",
         device=device,
@@ -229,14 +264,16 @@ def _assert_smooth_normals(device: str) -> None:
     n_f = gb_f["normal"][0]
     m = mask_s[0]
     center = torch.tensor([0.0, 0.0, 1.4], device=device)
-    fx = fy = 48.0 / (2.0 * math.tan(math.radians(50.0) * 0.5))
+    fx, fy, cx, cy = smooth.intrinsics.resolved_k()
     ys, xs = torch.meshgrid(
-        torch.arange(48, device=device, dtype=torch.float32),
-        torch.arange(48, device=device, dtype=torch.float32),
+        torch.arange(h, device=device, dtype=torch.float32),
+        torch.arange(w, device=device, dtype=torch.float32),
         indexing="ij",
     )
     z = gb_s["depth"][0]
-    hit = torch.stack([(xs + 0.5 - 24.0) / fx * z, (ys + 0.5 - 24.0) / fy * z, z], dim=-1)
+    hit = torch.stack(
+        [(xs + 0.5 - cx) / fx * z, (ys + 0.5 - cy) / fy * z, z], dim=-1
+    )
     expected = hit - center
     expected = expected / expected.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     # Kernel flips the normal toward the camera (−dir, here −Z).
@@ -247,7 +284,7 @@ def _assert_smooth_normals(device: str) -> None:
         raise SystemExit(
             f"smooth normals not closer to sphere: {float(err_s):.4f} vs face {float(err_f):.4f}"
         )
-    print(f"smooth_normals err={float(err_s):.4f} face_err={float(err_f):.4f}")
+    print(f"smooth_normals {w}x{h} err={float(err_s):.4f} face_err={float(err_f):.4f}")
 
 
 def _assert_g1_materials() -> None:
@@ -267,7 +304,9 @@ def _assert_g1_materials() -> None:
     print(f"g1_materials ankle=({r_ank:.2f},{m_ank:.2f}) hip=({r_hip:.2f},{m_hip:.2f}) hand=({r_hand:.2f},{m_hand:.2f})")
 
 
-def _assert_contact_and_shadows(device: str, out: Path) -> None:
+def _assert_contact_and_shadows(
+    device: str, out: Path, *, width: int | None = None, height: int | None = None
+) -> None:
     ground = trimesh.creation.box(extents=(4.0, 4.0, 0.04))
     cube = trimesh.creation.box(extents=(0.4, 0.4, 0.4))
     eye = np.array([1.15, -1.25, 0.85], dtype=np.float32)
@@ -280,11 +319,12 @@ def _assert_contact_and_shadows(device: str, out: Path) -> None:
     )
     mesh_quat = torch.tensor([[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]], device=device)
     sun = (0.85, 0.15, 0.50)
+    w, h = _size(width, height, 96, 64)
 
     def _cam(**extra):
         c = RaycastPBRCamera(
-            96,
-            64,
+            w,
+            h,
             fov_y_deg=55.0,
             convention="opencv",
             device=device,
@@ -336,14 +376,16 @@ def _assert_contact_and_shadows(device: str, out: Path) -> None:
     _write_preview(out / "shadow_map", rgb_s[0])
     _write_preview(out / "shadow_ray", rgb_r[0])
     print(
-        f"visibility contact_dark={float((vis_c[m0] < 0.95).float().mean()):.3f} "
+        f"visibility {w}x{h} contact_dark={float((vis_c[m0] < 0.95).float().mean()):.3f} "
         f"smap_dark={float((vis_s[m0] < 0.5).float().mean()):.3f} "
         f"sray_dark={float((vis_r[m0] < 0.5).float().mean()):.3f} "
         f"depth_max={float(d0[m0].max()):.3f}"
     )
 
 
-def _maybe_g1_preview(device: str, out: Path) -> None:
+def _maybe_g1_preview(
+    device: str, out: Path, *, width: int | None = None, height: int | None = None
+) -> None:
     xml = Path(G1_XML)
     if not xml.is_file():
         print(f"skip g1 preview (missing {xml})")
@@ -369,9 +411,10 @@ def _maybe_g1_preview(device: str, out: Path) -> None:
     cam_pos = torch.as_tensor(eye, device=device, dtype=torch.float32)
     cam_quat = torch.as_tensor(quats, device=device, dtype=torch.float32)
     mesh_pos, mesh_quat = bench.expand_poses(1, g1_pos, g1_quat, n_static, robot_first=False)
+    w, h = _size(width, height, 128, 96)
     pbr = RaycastPBRCamera(
-        128,
-        96,
+        w,
+        h,
         fov_y_deg=55.0,
         convention="opencv",
         device=device,
@@ -386,7 +429,7 @@ def _maybe_g1_preview(device: str, out: Path) -> None:
     rgb, depth, mask = pbr.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
     _write_preview(out / "g1_pbr", rgb[0])
     print(
-        f"g1 preview meshes={raycaster.n_meshes} hit_frac={float(mask.float().mean()):.3f} "
+        f"g1 preview {w}x{h} meshes={raycaster.n_meshes} hit_frac={float(mask.float().mean()):.3f} "
         f"rgb_mean={float(rgb[mask].mean()) if bool(mask.any()) else 0.0:.3f} "
         f"wrote {out / 'g1_pbr.png'}"
     )
@@ -394,6 +437,32 @@ def _maybe_g1_preview(device: str, out: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--width", type=int, default=None, help="Override all camera widths")
+    parser.add_argument("--height", type=int, default=None, help="Override all camera heights")
+    parser.add_argument(
+        "--res",
+        type=_parse_res,
+        default=None,
+        help="WxH shortcut (overrides --width/--height), e.g. 512x384",
+    )
+    parser.add_argument("--out", type=str, default="scripts/_pbr_smoke")
+    args = parser.parse_args()
+
+    if args.res is not None:
+        width, height = args.res
+    elif args.width is not None or args.height is not None:
+        width = args.width
+        height = args.height
+        if width is None:
+            width = max(16, round(height * 4 / 3))
+        if height is None:
+            height = max(16, round(width * 3 / 4))
+        if width < 16 or height < 16:
+            raise SystemExit(f"resolution {width}x{height} is below 16x16")
+    else:
+        width = height = None
+
     wp.init()
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
@@ -406,14 +475,19 @@ def main() -> None:
         raise SystemExit(f"unexpected HDRI shape {hdri.shape}")
     if float(hdri.max()) < 2.0:
         raise SystemExit("HDRI looks clipped (max < 2); need unclipped .hdr not a JPG")
+    if width is not None:
+        print(f"resolution override {width}x{height} (all cameras)")
+    else:
+        print("resolution defaults: box 64x48, sphere 48x48, shadows 96x64, g1 128x96")
 
-    out = Path("scripts/_pbr_smoke")
+    out = Path(args.out)
+    size_kw = dict(width=width, height=height)
     _assert_g1_materials()
-    _assert_lambert_parity(device, out)
-    _assert_vertex_colors(device, out)
-    _assert_smooth_normals(device)
-    _assert_contact_and_shadows(device, out)
-    _maybe_g1_preview(device, out)
+    _assert_lambert_parity(device, out, **size_kw)
+    _assert_vertex_colors(device, out, **size_kw)
+    _assert_smooth_normals(device, **size_kw)
+    _assert_contact_and_shadows(device, out, **size_kw)
+    _maybe_g1_preview(device, out, **size_kw)
     print(f"wrote under {out}")
     print("ok")
 
