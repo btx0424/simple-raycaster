@@ -218,6 +218,7 @@ With V2, omit `mesh_pos` / `mesh_quat` and pass only rays plus optional `mesh_in
 * `scripts/bench_pbr_camera.py` — PBR N-sweep (headline N=256)
 * `scripts/bench_tiled_filters.py` — Torch eager / `torch.compile` vs Warp tiled FXAA/SSAO
 * `scripts/orbit_g1_video.py` — depth / Lambert / PBR orbit MP4s
+* `scripts/demo_batched_materials.py` — one batched ``render`` with per-env albedo/rough/metal/sun/exposure
 * `scripts/bench_g1_camera.py` — G1 lidar + camera scene benchmark
 
 G1 MJCF is **not** vendored. Resolve it with (in order) `--xml`, env `SIMPLE_RAYCASTER_G1_XML`, or a file at `assets/unitree_g1/g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml` (also checks a sibling `../object_hoi/src/assets/unitree_g1/` layout). See `scripts/g1_assets.py`.

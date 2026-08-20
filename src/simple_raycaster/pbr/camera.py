@@ -14,7 +14,11 @@ from ..helpers import quat_rotate, quat_rotate_inverse, workspace_tensor
 from ..raycast_camera import CameraIntrinsics, RaycastCamera
 from .hdri import EnvironmentHDRI, default_hdri_path
 from .kernels import raycast_gbuffer_kernel, raycast_ortho_depth_kernel, shadow_ray_kernel
-from .materials import materials_for_names, pack_vertex_attrs, pack_vertex_attrs_from_wp
+from .materials import (
+    materials_for_names,
+    pack_vertex_normals,
+    pack_vertex_normals_from_wp,
+)
 from .shade import aces_tonemap, contact_shadows, fxaa, sample_shadow_map, shade_pbr, ssao
 from .tiled_filters import fxaa_tiled, ssao_tiled
 
@@ -35,6 +39,11 @@ class RaycastPBRCamera:
     with Torch FXAA/SSAO (compiled shade+FXAA ~2× vs eager; tiled FXAA loses to
     compile). Pass ``compile_mode=None`` and ``fxaa_impl="tiled"`` for the
     no-compile full-frame path (still beats eager Torch FXAA).
+
+    Materials/lights support mujoco_warp-style batched tables via
+    :meth:`set_materials` / :meth:`set_lights` (``[Nw, M, …]`` with ``Nw==1``
+    broadcast). G-buffer albedo/rough/metal come from those tables, not baked
+    vertex colors, so DR is a tensor write without rebinding meshes.
     """
 
     def __init__(
@@ -131,14 +140,14 @@ class RaycastPBRCamera:
         self._work: dict = {}
         self._compiled_shade_fxaa = None
         self._compiled_shade_fxaa_key: tuple | None = None
-        self._rough_t: torch.Tensor | None = None
-        self._metal_t: torch.Tensor | None = None
-        self._vert_color_t: torch.Tensor | None = None
+        self._albedo_t: torch.Tensor | None = None  # [Nw, M, 3]
+        self._rough_t: torch.Tensor | None = None  # [Nw, M]
+        self._metal_t: torch.Tensor | None = None  # [Nw, M]
         self._vert_normal_t: torch.Tensor | None = None
         self._vert_offset_t: torch.Tensor | None = None
+        self._albedo_wp = None
         self._rough_wp = None
         self._metal_wp = None
-        self._vert_color_wp = None
         self._vert_normal_wp = None
         self._vert_offset_wp = None
         self._mesh_names: list[str] = []
@@ -154,11 +163,19 @@ class RaycastPBRCamera:
                 device=self.geom.torch_device,
             )
         # Cached for CUDA-graph-safe shade (no host torch.tensor during capture).
+        # Leading dim 1 broadcasts across worlds (mujoco_warp-style).
+        device = self.geom.torch_device
         self._sun_dir_t = torch.tensor(
-            self.sun_dir, device=self.geom.torch_device, dtype=torch.float32
-        )
+            self.sun_dir, device=device, dtype=torch.float32
+        ).view(1, 3)
         self._sun_color_t = torch.tensor(
-            self.sun_color, device=self.geom.torch_device, dtype=torch.float32
+            self.sun_color, device=device, dtype=torch.float32
+        ).view(1, 3)
+        self._sun_intensity_t = torch.tensor(
+            [self.sun_intensity], device=device, dtype=torch.float32
+        )
+        self._exposure_t = torch.tensor(
+            [self.exposure], device=device, dtype=torch.float32
         )
 
     @property
@@ -210,15 +227,18 @@ class RaycastPBRCamera:
             meshes, albedos=albedos, pose_entity=pose_entity, pose_body_ids=pose_body_ids
         )
         self._pack_from_trimeshes(kept)
+        n = self.geom.n_meshes
+        base_alb = self.geom._albedo_t
+        assert base_alb is not None
         if roughness is None and metallic is None and any(self._mesh_names):
             r, m = materials_for_names(
                 self._mesh_names,
                 default_roughness=self.default_roughness,
                 default_metallic=self.default_metallic,
             )
-            self._set_materials(self.geom.n_meshes, r, m)
+            self.set_materials(albedo=base_alb, roughness=r, metallic=m)
         else:
-            self._set_materials(self.geom.n_meshes, roughness, metallic)
+            self.set_materials(albedo=base_alb, roughness=roughness, metallic=metallic)
 
     def bind_meshes(
         self,
@@ -251,75 +271,186 @@ class RaycastPBRCamera:
             src = getattr(raycaster, "mesh_names", None)
             self._mesh_names = [str(x) for x in src] if src is not None and len(src) == n else [""] * n
         self._pack_from_wp(self.geom.meshes_wp)
+        base_alb = self.geom._albedo_t
+        if base_alb is None:
+            base_alb = torch.tensor(
+                self.geom.default_albedo, device=self.geom.torch_device, dtype=torch.float32
+            ).view(1, 3).expand(n, 3).contiguous()
+            self.geom._albedo_t = base_alb
         if roughness is None and metallic is None and any(self._mesh_names):
             r, m = materials_for_names(
                 self._mesh_names,
                 default_roughness=self.default_roughness,
                 default_metallic=self.default_metallic,
             )
-            self._set_materials(n, r, m)
+            self.set_materials(albedo=base_alb, roughness=r, metallic=m)
         else:
-            self._set_materials(n, roughness, metallic)
+            self.set_materials(albedo=base_alb, roughness=roughness, metallic=metallic)
 
     def _pack_from_trimeshes(self, meshes: Sequence[trimesh.Trimesh]) -> None:
-        assert self.geom._albedo_t is not None
-        alb = self.geom._albedo_t.detach().float().cpu().numpy()
-        colors, normals, offsets = pack_vertex_attrs(meshes, alb)
-        self._set_vertex_attrs(colors, normals, offsets)
+        normals, offsets = pack_vertex_normals(meshes)
+        self._set_vertex_normals(normals, offsets)
 
     def _pack_from_wp(self, meshes_wp: Sequence) -> None:
-        assert self.geom._albedo_t is not None
-        alb = self.geom._albedo_t.detach().float().cpu().numpy()
-        colors, normals, offsets = pack_vertex_attrs_from_wp(meshes_wp, alb)
-        self._set_vertex_attrs(colors, normals, offsets)
+        normals, offsets = pack_vertex_normals_from_wp(meshes_wp)
+        self._set_vertex_normals(normals, offsets)
 
-    def _set_vertex_attrs(
-        self, colors: np.ndarray, normals: np.ndarray, offsets: np.ndarray
-    ) -> None:
+    def _set_vertex_normals(self, normals: np.ndarray, offsets: np.ndarray) -> None:
         device = self.geom.torch_device
-        self._vert_color_t = torch.as_tensor(colors, device=device, dtype=torch.float32)
         self._vert_normal_t = torch.as_tensor(normals, device=device, dtype=torch.float32)
         self._vert_offset_t = torch.as_tensor(offsets, device=device, dtype=torch.int32)
-        self._vert_color_wp = None
         self._vert_normal_wp = None
         self._vert_offset_wp = None
         self.geom.initialized = False
 
-    def _set_materials(
-        self,
-        n: int,
-        roughness: Sequence | torch.Tensor | float | None,
-        metallic: Sequence | torch.Tensor | float | None,
-    ) -> None:
-        device = self.geom.torch_device
-
-        def _vec(val, default: float) -> torch.Tensor:
-            if val is None:
-                t = torch.full((n,), default, device=device, dtype=torch.float32)
-            elif torch.is_tensor(val):
-                t = val.to(device=device, dtype=torch.float32).reshape(-1)
-            elif np.isscalar(val):
-                t = torch.full((n,), float(val), device=device, dtype=torch.float32)
+    @staticmethod
+    def _normalize_mesh_table(
+        val: Sequence | torch.Tensor | float | None,
+        *,
+        n_meshes: int,
+        default: float | tuple[float, ...],
+        device: torch.device,
+        n_feat: int | None = None,
+    ) -> torch.Tensor:
+        """Return a contiguous ``[Nw, M]`` or ``[Nw, M, F]`` table."""
+        if val is None:
+            if n_feat is None:
+                t = torch.full((1, n_meshes), float(default), device=device, dtype=torch.float32)
             else:
-                t = torch.as_tensor(val, device=device, dtype=torch.float32).reshape(-1)
-            if t.numel() != n:
-                raise ValueError(f"material length {t.numel()} != n_meshes {n}")
+                base = torch.as_tensor(default, device=device, dtype=torch.float32).reshape(n_feat)
+                t = base.view(1, 1, n_feat).expand(1, n_meshes, n_feat).contiguous()
+            return t
+
+        t = torch.as_tensor(val, device=device, dtype=torch.float32)
+        if n_feat is None:
+            if t.ndim == 0:
+                t = t.view(1, 1).expand(1, n_meshes)
+            elif t.ndim == 1:
+                if t.numel() != n_meshes:
+                    raise ValueError(f"material length {t.numel()} != n_meshes {n_meshes}")
+                t = t.view(1, n_meshes)
+            elif t.ndim == 2:
+                if t.shape[-1] != n_meshes:
+                    raise ValueError(f"material shape {tuple(t.shape)} last dim != {n_meshes}")
+            else:
+                raise ValueError(f"expected scalar/[M]/[Nw,M], got {tuple(t.shape)}")
             return t.contiguous()
 
-        self._rough_t = _vec(roughness, self.default_roughness)
-        self._metal_t = _vec(metallic, self.default_metallic)
+        if t.ndim == 1:
+            if t.numel() != n_feat:
+                raise ValueError(f"feature length {t.numel()} != {n_feat}")
+            t = t.view(1, 1, n_feat).expand(1, n_meshes, n_feat)
+        elif t.ndim == 2:
+            if t.shape == (n_meshes, n_feat):
+                t = t.unsqueeze(0)
+            elif t.shape == (1, n_feat):
+                t = t.view(1, 1, n_feat).expand(1, n_meshes, n_feat)
+            else:
+                raise ValueError(f"albedo shape {tuple(t.shape)} incompatible with M={n_meshes}")
+        elif t.ndim == 3:
+            if t.shape[-2:] != (n_meshes, n_feat):
+                raise ValueError(f"albedo shape {tuple(t.shape)} incompatible with M={n_meshes}")
+        else:
+            raise ValueError(f"expected [M,3]/[Nw,M,3], got {tuple(t.shape)}")
+        return t.contiguous()
+
+    def set_materials(
+        self,
+        *,
+        albedo: Sequence | torch.Tensor | None = None,
+        roughness: Sequence | torch.Tensor | float | None = None,
+        metallic: Sequence | torch.Tensor | float | None = None,
+    ) -> None:
+        """Update mesh albedo/roughness/metallic tables without rebinding geometry.
+
+        Shapes: ``[M]`` / ``[M,3]``, or batched ``[Nw, M]`` / ``[Nw, M, 3]``.
+        ``Nw==1`` broadcasts across camera batch rows (like mujoco_warp).
+        """
+        n = int(self.geom.n_meshes)
+        if n <= 0:
+            raise RuntimeError("bind meshes before set_materials")
+        device = self.geom.torch_device
+        if albedo is not None or self._albedo_t is None:
+            src = albedo
+            if src is None:
+                src = self.geom._albedo_t
+            if src is None:
+                src = self.geom.default_albedo
+            self._albedo_t = self._normalize_mesh_table(
+                src, n_meshes=n, default=tuple(self.geom.default_albedo), device=device, n_feat=3
+            )
+        if roughness is not None or self._rough_t is None:
+            self._rough_t = self._normalize_mesh_table(
+                roughness if roughness is not None else self._rough_t,
+                n_meshes=n,
+                default=self.default_roughness,
+                device=device,
+            )
+        if metallic is not None or self._metal_t is None:
+            self._metal_t = self._normalize_mesh_table(
+                metallic if metallic is not None else self._metal_t,
+                n_meshes=n,
+                default=self.default_metallic,
+                device=device,
+            )
+        self._albedo_wp = None
         self._rough_wp = None
         self._metal_wp = None
-        self.geom.initialized = False
+        self._compiled_shade_fxaa = None
+        self._compiled_shade_fxaa_key = None
+
+    def set_lights(
+        self,
+        *,
+        sun_dir: Sequence | torch.Tensor | None = None,
+        sun_color: Sequence | torch.Tensor | None = None,
+        sun_intensity: Sequence | torch.Tensor | float | None = None,
+        exposure: Sequence | torch.Tensor | float | None = None,
+    ) -> None:
+        """Update sun / exposure. Accepts shared ``[3]``/scalar or batched ``[N,…]``."""
+        device = self.geom.torch_device
+
+        def _vec3(val, fallback: torch.Tensor) -> torch.Tensor:
+            if val is None:
+                return fallback
+            t = torch.as_tensor(val, device=device, dtype=torch.float32)
+            if t.ndim == 1:
+                if t.numel() != 3:
+                    raise ValueError(f"expected 3-vector, got {tuple(t.shape)}")
+                t = t.view(1, 3)
+            elif t.ndim == 2:
+                if t.shape[-1] != 3:
+                    raise ValueError(f"expected [N,3], got {tuple(t.shape)}")
+            else:
+                raise ValueError(f"expected [3] or [N,3], got {tuple(t.shape)}")
+            return t.contiguous()
+
+        def _scalar(val, fallback: torch.Tensor) -> torch.Tensor:
+            if val is None:
+                return fallback
+            t = torch.as_tensor(val, device=device, dtype=torch.float32).reshape(-1)
+            return t.contiguous()
+
+        self._sun_dir_t = _vec3(sun_dir, self._sun_dir_t)
+        self._sun_color_t = _vec3(sun_color, self._sun_color_t)
+        self._sun_intensity_t = _scalar(sun_intensity, self._sun_intensity_t)
+        self._exposure_t = _scalar(exposure, self._exposure_t)
+        # Keep Python scalar mirrors for the leading entry (debug / repr).
+        self.sun_dir = tuple(float(x) for x in self._sun_dir_t[0].tolist())
+        self.sun_color = tuple(float(x) for x in self._sun_color_t[0].tolist())
+        self.sun_intensity = float(self._sun_intensity_t[0].item())
+        self.exposure = float(self._exposure_t[0].item())
+        self._compiled_shade_fxaa = None
+        self._compiled_shade_fxaa_key = None
 
     def initialize(self) -> None:
         self.geom.initialize()
-        assert self._rough_t is not None and self._metal_t is not None
-        assert self._vert_color_t is not None and self._vert_normal_t is not None
-        assert self._vert_offset_t is not None
-        self._rough_wp = wp.from_torch(self._rough_t, dtype=wp.float32)
-        self._metal_wp = wp.from_torch(self._metal_t, dtype=wp.float32)
-        self._vert_color_wp = wp.from_torch(self._vert_color_t, dtype=wp.vec3)
+        assert self._albedo_t is not None and self._rough_t is not None and self._metal_t is not None
+        assert self._vert_normal_t is not None and self._vert_offset_t is not None
+        alb = self._albedo_t.contiguous()
+        self._albedo_wp = wp.from_torch(alb, dtype=wp.vec3)
+        self._rough_wp = wp.from_torch(self._rough_t.contiguous(), dtype=wp.float32)
+        self._metal_wp = wp.from_torch(self._metal_t.contiguous(), dtype=wp.float32)
         self._vert_normal_wp = wp.from_torch(self._vert_normal_t, dtype=wp.vec3)
         self._vert_offset_wp = wp.from_torch(self._vert_offset_t, dtype=wp.int32)
 
@@ -471,7 +602,12 @@ class RaycastPBRCamera:
                 height or self.intrinsics.height,
                 fov_y_deg=fov_y_deg,
             )
-        if not self.geom.initialized or self._rough_wp is None or self._vert_color_wp is None:
+        if (
+            not self.geom.initialized
+            or self._rough_wp is None
+            or self._albedo_wp is None
+            or self._vert_normal_wp is None
+        ):
             self.initialize()
 
         n = cam_pos_w.shape[0]
@@ -508,9 +644,9 @@ class RaycastPBRCamera:
                 self.geom.meshes_array,
                 wp.from_torch(mesh_pos, dtype=wp.vec3, return_ctype=True),
                 wp.from_torch(mesh_quat, dtype=wp.vec4, return_ctype=True),
+                self._albedo_wp,
                 self._rough_wp,
                 self._metal_wp,
-                self._vert_color_wp,
                 self._vert_normal_wp,
                 self._vert_offset_wp,
                 wp.from_torch(cam_pos_w.contiguous(), dtype=wp.vec3, return_ctype=True),
@@ -581,9 +717,22 @@ class RaycastPBRCamera:
         if light_dir is None:
             sun = self._sun_dir_t
         elif isinstance(light_dir, torch.Tensor):
-            sun = light_dir.to(device=self.geom.torch_device, dtype=torch.float32).reshape(3)
+            sun = light_dir.to(device=self.geom.torch_device, dtype=torch.float32)
+            if sun.ndim == 1:
+                sun = sun.view(1, 3)
+            elif sun.ndim != 2 or sun.shape[-1] != 3:
+                raise ValueError(f"light_dir expected [3] or [N,3], got {tuple(sun.shape)}")
         else:
-            sun = torch.tensor(light_dir, device=self.geom.torch_device, dtype=torch.float32)
+            sun = torch.tensor(light_dir, device=self.geom.torch_device, dtype=torch.float32).view(1, 3)
+
+        # Broadcast sun rows to camera batch (Nw==1 or Nw==N).
+        n_cam = cam_pos_w.shape[0]
+        if sun.shape[0] == 1 and n_cam > 1:
+            sun_b = sun.expand(n_cam, 3)
+        elif sun.shape[0] == n_cam:
+            sun_b = sun
+        else:
+            raise ValueError(f"light_dir batch {sun.shape[0]} != cameras {n_cam}")
 
         vis = torch.ones_like(gb["depth"])
         fx, fy, cx, cy = self.intrinsics.resolved_k()
@@ -594,10 +743,13 @@ class RaycastPBRCamera:
             hit_w = self._hit_positions_w(gb, cam_pos_w.contiguous(), cam_quat_wxyz.contiguous())
             gb["position"] = hit_w
 
+        # Shadow map / shadow rays currently use a shared sun direction (row 0).
+        sun0 = sun_b[0]
+
         if self.contact_shadows_enabled:
             sun_cam = quat_rotate_inverse(
                 cam_quat_wxyz.contiguous(),
-                sun.view(1, 3).expand_as(cam_pos_w),
+                sun_b,
             )
             vis = vis * contact_shadows(
                 planar,
@@ -612,7 +764,7 @@ class RaycastPBRCamera:
 
         if self.shadow_map_enabled:
             assert hit_w is not None
-            sm, center, right, up, forward = self._render_shadow_map(cam_pos_w.shape[0], sun)
+            sm, center, right, up, forward = self._render_shadow_map(cam_pos_w.shape[0], sun0)
             vis = vis * sample_shadow_map(
                 hit_w,
                 gb["mask"],
@@ -627,13 +779,13 @@ class RaycastPBRCamera:
 
         if self.shadow_rays:
             assert hit_w is not None
-            vis = vis * self._render_shadow_rays(gb, hit_w, sun)
+            vis = vis * self._render_shadow_rays(gb, hit_w, sun0)
 
         rgb, hdr = self._shade_tonemap_fxaa(
             gb,
             planar,
             vis,
-            sun,
+            sun_b,
             fx=fx,
             fy=fy,
             cx=cx,
@@ -666,16 +818,11 @@ class RaycastPBRCamera:
             self.ssao_enabled,
             self.ssao_radius,
             self.fxaa_enabled,
-            self.exposure,
-            self.sun_intensity,
         )
         if self._compiled_shade_fxaa is not None and self._compiled_shade_fxaa_key == key:
             return self._compiled_shade_fxaa
 
         env = self.env
-        sun_color = self._sun_color_t
-        exposure = float(self.exposure)
-        sun_intensity = float(self.sun_intensity)
         do_ssao = bool(self.ssao_enabled)
         do_fxaa = bool(self.fxaa_enabled)
         ssao_radius = float(self.ssao_radius)
@@ -690,6 +837,9 @@ class RaycastPBRCamera:
             planar: torch.Tensor,
             vis: torch.Tensor,
             sun: torch.Tensor,
+            sun_color: torch.Tensor,
+            sun_intensity: torch.Tensor,
+            exposure: torch.Tensor,
             fx: float,
             fy: float,
             cx: float,
@@ -730,6 +880,20 @@ class RaycastPBRCamera:
         self._compiled_shade_fxaa_key = key
         return compiled
 
+    def _broadcast_light_rows(self, n: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        def _row(t: torch.Tensor) -> torch.Tensor:
+            if t.shape[0] == 1 and n > 1:
+                return t.expand(n, *t.shape[1:])
+            if t.shape[0] == n:
+                return t
+            raise ValueError(f"light batch {t.shape[0]} != cameras {n}")
+
+        return (
+            _row(self._sun_color_t),
+            _row(self._sun_intensity_t),
+            _row(self._exposure_t),
+        )
+
     def _shade_tonemap_fxaa(
         self,
         gb: dict[str, torch.Tensor],
@@ -744,6 +908,8 @@ class RaycastPBRCamera:
         cam_quat_wxyz: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Direct shade → optional AO/GI → tonemap → FXAA. Returns ``(rgb, hdr)``."""
+        n = gb["albedo"].shape[0]
+        sun_color, sun_intensity, exposure = self._broadcast_light_rows(n)
         if self._fold_torch_post():
             compiled = self._ensure_compiled_torch_post()
             return compiled(
@@ -756,6 +922,9 @@ class RaycastPBRCamera:
                 planar,
                 vis,
                 sun,
+                sun_color,
+                sun_intensity,
+                exposure,
                 fx,
                 fy,
                 cx,
@@ -770,8 +939,8 @@ class RaycastPBRCamera:
             gb["metallic"],
             self.env,
             sun_dir_w=sun,
-            sun_intensity=self.sun_intensity,
-            sun_color=self._sun_color_t,
+            sun_intensity=sun_intensity,
+            sun_color=sun_color,
             sun_visibility=vis,
         )
         bg = self.env.sample(-gb["view"], roughness=0.0)
@@ -786,7 +955,7 @@ class RaycastPBRCamera:
             cy=cy,
             cam_quat_wxyz=cam_quat_wxyz,
         )
-        rgb = aces_tonemap(hdr, exposure=self.exposure)
+        rgb = aces_tonemap(hdr, exposure=exposure)
         if self.fxaa_enabled:
             if self.fxaa_impl == "tiled":
                 rgb = fxaa_tiled(rgb)

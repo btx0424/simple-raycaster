@@ -122,11 +122,47 @@ def vertex_normals_local(mesh: trimesh.Trimesh) -> np.ndarray:
     return _recompute_normals(verts, faces)
 
 
+def pack_vertex_normals(
+    meshes: Sequence[trimesh.Trimesh],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Concatenate per-mesh smooth normals (albedo lives in a mesh table now).
+
+    Returns:
+        ``(vert_normals [V,3], vert_offset [M])``.
+    """
+    normals: list[np.ndarray] = []
+    offsets = np.empty(len(meshes), dtype=np.int32)
+    off = 0
+    for i, mesh in enumerate(meshes):
+        offsets[i] = off
+        normals.append(vertex_normals_local(mesh))
+        off += int(len(mesh.vertices))
+    if not normals:
+        raise ValueError("pack_vertex_normals: no meshes")
+    return np.concatenate(normals, axis=0).astype(np.float32, copy=False), offsets
+
+
+def pack_vertex_normals_from_wp(meshes_wp: Sequence) -> tuple[np.ndarray, np.ndarray]:
+    """Normals + offsets from ``wp.Mesh`` list."""
+    normals: list[np.ndarray] = []
+    offsets = np.empty(len(meshes_wp), dtype=np.int32)
+    off = 0
+    for i, mesh in enumerate(meshes_wp):
+        pts = np.asarray(mesh.points.numpy(), dtype=np.float32).reshape(-1, 3)
+        faces = np.asarray(mesh.indices.numpy(), dtype=np.int32).reshape(-1, 3)
+        offsets[i] = off
+        normals.append(_recompute_normals(pts, faces))
+        off += int(len(pts))
+    if not normals:
+        raise ValueError("pack_vertex_normals_from_wp: no meshes")
+    return np.concatenate(normals, axis=0).astype(np.float32, copy=False), offsets
+
+
 def pack_vertex_attrs(
     meshes: Sequence[trimesh.Trimesh],
     albedos: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Concatenate per-mesh vertex colors/normals.
+    """Concatenate per-mesh vertex colors/normals (legacy; prefer mesh albedo table).
 
     Returns:
         ``(vert_colors [V,3], vert_normals [V,3], vert_offset [M])`` — ``vert_offset[m]``
@@ -136,19 +172,15 @@ def pack_vertex_attrs(
     if albedos.shape[0] != len(meshes):
         raise ValueError(f"albedos {albedos.shape[0]} != n_meshes {len(meshes)}")
     colors: list[np.ndarray] = []
-    normals: list[np.ndarray] = []
-    offsets = np.empty(len(meshes), dtype=np.int32)
+    normals, offsets = pack_vertex_normals(meshes)
     off = 0
     for i, mesh in enumerate(meshes):
-        offsets[i] = off
+        assert offsets[i] == off
         colors.append(vertex_colors_or_albedo(mesh, albedos[i]))
-        normals.append(vertex_normals_local(mesh))
         off += int(len(mesh.vertices))
-    if not colors:
-        raise ValueError("pack_vertex_attrs: no meshes")
     return (
         np.concatenate(colors, axis=0).astype(np.float32, copy=False),
-        np.concatenate(normals, axis=0).astype(np.float32, copy=False),
+        normals,
         offsets,
     )
 
@@ -161,19 +193,15 @@ def pack_vertex_attrs_from_wp(
     albedos = np.asarray(albedos, dtype=np.float32).reshape(-1, 3)
     if albedos.shape[0] != len(meshes_wp):
         raise ValueError(f"albedos {albedos.shape[0]} != n_meshes {len(meshes_wp)}")
+    normals, offsets = pack_vertex_normals_from_wp(meshes_wp)
     colors: list[np.ndarray] = []
-    normals: list[np.ndarray] = []
-    offsets = np.empty(len(meshes_wp), dtype=np.int32)
-    off = 0
     for i, mesh in enumerate(meshes_wp):
-        pts = np.asarray(mesh.points.numpy(), dtype=np.float32).reshape(-1, 3)
-        faces = np.asarray(mesh.indices.numpy(), dtype=np.int32).reshape(-1, 3)
-        offsets[i] = off
-        colors.append(np.broadcast_to(albedos[i], (len(pts), 3)).copy())
-        normals.append(_recompute_normals(pts, faces))
-        off += int(len(pts))
+        n_verts = int(offsets[i + 1] - offsets[i]) if i + 1 < len(offsets) else int(
+            normals.shape[0] - offsets[i]
+        )
+        colors.append(np.broadcast_to(albedos[i], (n_verts, 3)).copy())
     return (
         np.concatenate(colors, axis=0).astype(np.float32, copy=False),
-        np.concatenate(normals, axis=0).astype(np.float32, copy=False),
+        normals,
         offsets,
     )

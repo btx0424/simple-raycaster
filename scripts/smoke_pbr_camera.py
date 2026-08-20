@@ -194,65 +194,55 @@ def _assert_lambert_parity(
     )
 
 
-def _assert_vertex_colors(
+def _assert_mesh_table_albedo(
     device: str, out: Path, *, width: int | None = None, height: int | None = None
 ) -> None:
-    """Three-vertex triangle: red / green / blue — barycentric lerp at center."""
-    verts = np.array(
-        [[-0.6, 0.5, 1.5], [0.6, 0.5, 1.5], [0.0, -0.5, 1.5]],
-        dtype=np.float32,
-    )
-    faces = np.array([[0, 1, 2]], dtype=np.int32)
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    mesh.visual.vertex_colors = np.array(
-        [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]],
-        dtype=np.uint8,
-    )
+    """Two-env batch: same mesh, different mesh-table albedos in one render."""
+    sphere = trimesh.creation.icosphere(subdivisions=2, radius=0.4)
     w, h = _size(width, height, 64, 48)
     pbr = RaycastPBRCamera(
         w,
         h,
-        fov_y_deg=70.0,
+        fov_y_deg=50.0,
         convention="opencv",
         device=device,
         ssao_enabled=False,
         contact_shadows_enabled=False,
+        compile_mode=None,
+        fxaa_enabled=False,
     )
-    pbr.bind_trimeshes([mesh], albedos=[(0.5, 0.5, 0.5)])
-    cam_pos = torch.zeros(1, 3, device=device)
-    cam_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
-    mesh_pos = torch.zeros(1, 1, 3, device=device)
-    mesh_quat = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=device)
-    rgb, depth, mask, gb = pbr.render(
+    pbr.bind_trimeshes([sphere], albedos=[(0.5, 0.5, 0.5)])
+    # Env 0 red, env 1 green — shared geometry, one batched call.
+    pbr.set_materials(
+        albedo=torch.tensor(
+            [[[0.9, 0.1, 0.1]], [[0.1, 0.9, 0.1]]],
+            device=device,
+            dtype=torch.float32,
+        )
+    )
+    cam_pos = torch.zeros(2, 3, device=device)
+    cam_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
+    mesh_pos = torch.tensor([[[0.0, 0.0, 1.4]], [[0.0, 0.0, 1.4]]], device=device)
+    mesh_quat = torch.tensor(
+        [[[1.0, 0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0, 0.0]]], device=device
+    )
+    rgb, _, mask, gb = pbr.render(
         cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat, return_gbuffer=True
     )
-    del depth
-    if float(mask.float().mean()) < 0.02:
-        raise SystemExit(f"vertex-color triangle missed, hit_frac={float(mask.float().mean())}")
-    alb = gb["albedo"][0]
-    m = mask[0]
-    # Mid row of the image should clip the triangle; leftmost hit is nearer the
-    # red vertex, rightmost nearer green, and a lower row nearer blue.
-    row = h // 2
-    cols = torch.where(m[row])[0]
-    if cols.numel() < 4:
-        raise SystemExit(f"vertex-color triangle too thin on row {row}: {int(cols.numel())} hits")
-    left = alb[row, int(cols[0])]
-    right = alb[row, int(cols[-1])]
-    if not (float(left[0]) > float(right[0]) + 0.08 and float(right[1]) > float(left[1]) + 0.08):
-        raise SystemExit(f"barycentric colors not split L/R: left={left.tolist()} right={right.tolist()}")
-    rows = torch.where(m.any(dim=1))[0]
-    top_cols = torch.where(m[int(rows[0])])[0]
-    bot_cols = torch.where(m[int(rows[-1])])[0]
-    top = alb[int(rows[0]), int(top_cols[top_cols.numel() // 2])]
-    bot = alb[int(rows[-1]), int(bot_cols[bot_cols.numel() // 2])]
-    # OpenCV +Y is down: v2 (blue) is at negative Y = top of the image.
-    if float(top[2]) < float(bot[2]) + 0.2:
-        raise SystemExit(f"expected blue at top vertex, top={top.tolist()} bot={bot.tolist()}")
-    _write_preview(out / "vertex_colors", rgb[0])
+    if float(mask.float().mean()) < 0.05:
+        raise SystemExit(f"mesh-table sphere missed, hit_frac={float(mask.float().mean())}")
+    a0 = gb["albedo"][0][mask[0]].mean(0)
+    a1 = gb["albedo"][1][mask[1]].mean(0)
+    if not (float(a0[0]) > 0.7 and float(a0[1]) < 0.3):
+        raise SystemExit(f"env0 expected red albedo, got {a0.tolist()}")
+    if not (float(a1[1]) > 0.7 and float(a1[0]) < 0.3):
+        raise SystemExit(f"env1 expected green albedo, got {a1.tolist()}")
+    _write_preview(out / "mesh_table_red", rgb[0])
+    _write_preview(out / "mesh_table_green", rgb[1])
     print(
-        f"vertex_colors {w}x{h} hit_frac={float(mask.float().mean()):.3f} "
-        f"left_r={float(left[0]):.2f} right_g={float(right[1]):.2f} top_b={float(top[2]):.2f}"
+        f"mesh_table_albedo {w}x{h} hit_frac={float(mask.float().mean()):.3f} "
+        f"env0_rgb_mean={float(rgb[0][mask[0]].mean()):.3f} "
+        f"env1_rgb_mean={float(rgb[1][mask[1]].mean()):.3f}"
     )
 
 
@@ -591,7 +581,7 @@ def main() -> None:
     _assert_g1_materials()
     _assert_fxaa(device, out)
     _assert_lambert_parity(device, out, **size_kw)
-    _assert_vertex_colors(device, out, **size_kw)
+    _assert_mesh_table_albedo(device, out, **size_kw)
     _assert_smooth_normals(device, **size_kw)
     _assert_contact_and_shadows(device, out, **size_kw)
     _maybe_g1_preview(device, out, **size_kw)

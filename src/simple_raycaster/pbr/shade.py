@@ -41,7 +41,7 @@ def shade_pbr(
     env: EnvironmentHDRI,
     *,
     sun_dir_w: torch.Tensor,
-    sun_intensity: float = 2.5,
+    sun_intensity: float | torch.Tensor = 2.5,
     sun_color: tuple[float, float, float] | torch.Tensor = (1.0, 0.98, 0.92),
     sun_visibility: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -50,12 +50,23 @@ def shade_pbr(
     ``sun_visibility`` (optional, ``[...]`` in ``[0,1]``) scales only the sun
     terms — IBL is unchanged. Contact shadows / shadow maps / shadow rays.
 
-    Pass ``sun_color`` as a device tensor if this path may run under a CUDA
-    graph (host ``torch.tensor(...)`` is illegal during capture).
+    ``sun_dir_w`` / ``sun_color`` accept ``[3]`` or batched ``[N, 3]`` (broadcast
+    over spatial dims). ``sun_intensity`` may be a scalar or ``[N]``.
     """
     n = normal_w / normal_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     v = view_w / view_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-    l = sun_dir_w / sun_dir_w.norm().clamp_min(1e-8)
+
+    sun_dir = sun_dir_w.to(device=n.device, dtype=n.dtype)
+    if sun_dir.ndim == 1:
+        l = sun_dir.reshape(*([1] * (n.ndim - 1)), 3)
+    elif sun_dir.ndim == 2:
+        # [N, 3] → [N, 1, ..., 1, 3]
+        lead = [sun_dir.shape[0]] + [1] * (n.ndim - 2) + [3]
+        l = sun_dir.reshape(*lead)
+    else:
+        l = sun_dir
+    l = l / l.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+
     h = l + v
     h = h / h.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
@@ -76,10 +87,21 @@ def shade_pbr(
 
     kd = (1.0 - f) * (1.0 - metallic.unsqueeze(-1))
     if isinstance(sun_color, torch.Tensor):
-        sun_rgb = sun_color.reshape(3)
+        sun_rgb = sun_color.to(device=n.device, dtype=n.dtype)
+        if sun_rgb.ndim == 1:
+            sun_rgb = sun_rgb.reshape(*([1] * (n.ndim - 1)), 3)
+        elif sun_rgb.ndim == 2:
+            sun_rgb = sun_rgb.reshape(sun_rgb.shape[0], *([1] * (n.ndim - 2)), 3)
     else:
         sun_rgb = torch.tensor(sun_color, device=albedo.device, dtype=albedo.dtype)
-    sun = sun_intensity * sun_rgb
+        sun_rgb = sun_rgb.reshape(*([1] * (n.ndim - 1)), 3)
+
+    if torch.is_tensor(sun_intensity):
+        si = sun_intensity.to(device=n.device, dtype=n.dtype).reshape(-1)
+        si = si.reshape(si.shape[0], *([1] * (n.ndim - 1)))
+    else:
+        si = float(sun_intensity)
+    sun = si * sun_rgb
     diff_sun = kd * albedo * (n_dot_l.unsqueeze(-1) / _PI)
 
     irr = env.irradiance(n)
@@ -93,8 +115,14 @@ def shade_pbr(
     return diff_sun * sun + spec_sun * sun + diff_ibl + spec_ibl
 
 
-def aces_tonemap(hdr: torch.Tensor, exposure: float = 1.0) -> torch.Tensor:
-    x = hdr * float(exposure)
+def aces_tonemap(hdr: torch.Tensor, exposure: float | torch.Tensor = 1.0) -> torch.Tensor:
+    if torch.is_tensor(exposure):
+        exp = exposure.to(device=hdr.device, dtype=hdr.dtype)
+        if exp.ndim == 1 and hdr.ndim >= 2:
+            exp = exp.reshape(exp.shape[0], *([1] * (hdr.ndim - 1)))
+        x = hdr * exp
+    else:
+        x = hdr * float(exposure)
     a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
     return ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
 

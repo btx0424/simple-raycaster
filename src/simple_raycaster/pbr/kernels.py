@@ -6,9 +6,9 @@ def raycast_gbuffer_kernel(
     meshes: wp.array(dtype=wp.uint64),
     mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),
     mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),
-    mesh_roughness: wp.array(dtype=wp.float32, ndim=1),
-    mesh_metallic: wp.array(dtype=wp.float32, ndim=1),
-    vert_colors: wp.array(dtype=wp.vec3, ndim=1),
+    mesh_albedo: wp.array(dtype=wp.vec3, ndim=2),
+    mesh_roughness: wp.array(dtype=wp.float32, ndim=2),
+    mesh_metallic: wp.array(dtype=wp.float32, ndim=2),
     vert_normals: wp.array(dtype=wp.vec3, ndim=1),
     vert_offset: wp.array(dtype=wp.int32, ndim=1),
     cam_pos_w: wp.array(dtype=wp.vec3, ndim=1),
@@ -32,7 +32,7 @@ def raycast_gbuffer_kernel(
     metallic_out: wp.array(dtype=wp.float32, ndim=2),
     view_out: wp.array(dtype=wp.vec3, ndim=2),
 ):
-    """Closest-hit G-buffer. Barycentric vertex colors / smooth normals; no shade."""
+    """Closest-hit G-buffer. Albedo/rough/metal from per-(world, mesh) tables."""
     n, pix = wp.tid()
     n_meshes = mesh_pos_w.shape[1]
     px = pix % width
@@ -53,11 +53,16 @@ def raycast_gbuffer_kernel(
     dir_w = wp.quat_rotate(cq_xyzw, dir_c)
     view_out[n, pix] = -dir_w
 
+    # Shared tables (shape[0]==1) broadcast like mujoco_warp ``worldid % n``.
+    wi_a = n % mesh_albedo.shape[0]
+    wi_r = n % mesh_roughness.shape[0]
+    wi_m = n % mesh_metallic.shape[0]
+
     best_t = float(far)
     best_n = wp.vec3(0.0, 0.0, 0.0)
     best_albedo = wp.vec3(0.65, 0.65, 0.65)
     best_r = float(0.45)
-    best_m = float(0.0)
+    best_met = float(0.0)
     hit = wp.bool(False)
 
     for m in range(n_meshes):
@@ -71,7 +76,6 @@ def raycast_gbuffer_kernel(
             best_t = result.t
             # Barycentric weights for mesh_query_ray (Warp ≥1.6):
             # hit = u*v0 + v*v1 + (1-u-v)*v2 — not the mesh_eval_position convention.
-            # (not the mesh_eval_position convention).
             w0 = result.u
             w1 = result.v
             w2 = float(1.0) - w0 - w1
@@ -81,11 +85,6 @@ def raycast_gbuffer_kernel(
             i1 = wp.mesh_get_index(mid, face * 3 + 1)
             i2 = wp.mesh_get_index(mid, face * 3 + 2)
             base = vert_offset[m]
-            best_albedo = (
-                vert_colors[base + i0] * w0
-                + vert_colors[base + i1] * w1
-                + vert_colors[base + i2] * w2
-            )
             if use_smooth != 0:
                 n_local = (
                     vert_normals[base + i0] * w0
@@ -99,8 +98,9 @@ def raycast_gbuffer_kernel(
                     best_n = wp.quat_rotate(mq_xyzw, result.normal)
             else:
                 best_n = wp.quat_rotate(mq_xyzw, result.normal)
-            best_r = mesh_roughness[m]
-            best_m = mesh_metallic[m]
+            best_albedo = mesh_albedo[wi_a, m]
+            best_r = mesh_roughness[wi_r, m]
+            best_met = mesh_metallic[wi_m, m]
             hit = wp.bool(True)
 
     if hit:
@@ -117,7 +117,7 @@ def raycast_gbuffer_kernel(
         normal_out[n, pix] = best_n
         albedo_out[n, pix] = best_albedo
         roughness_out[n, pix] = best_r
-        metallic_out[n, pix] = best_m
+        metallic_out[n, pix] = best_met
     else:
         depth_out[n, pix] = far
         mask_out[n, pix] = wp.bool(False)
