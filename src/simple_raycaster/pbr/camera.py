@@ -15,7 +15,7 @@ from ..raycast_camera import CameraIntrinsics, RaycastCamera
 from .hdri import EnvironmentHDRI, default_hdri_path
 from .kernels import raycast_gbuffer_kernel, raycast_ortho_depth_kernel, shadow_ray_kernel
 from .materials import materials_for_names, pack_vertex_attrs, pack_vertex_attrs_from_wp
-from .shade import aces_tonemap, contact_shadows, sample_shadow_map, shade_pbr, ssao
+from .shade import aces_tonemap, contact_shadows, fxaa, sample_shadow_map, shade_pbr, ssao
 
 
 class RaycastPBRCamera:
@@ -26,8 +26,9 @@ class RaycastPBRCamera:
     RGB is ACES-tonemapped LDR; linear HDR is available via ``return_hdr=True``.
 
     Screen-space contact shadows (no extra mesh ray) are on by default.
-    A 256² sun shadow map and a true shadow-ray pass are opt-in pretty/debug
-    knobs — they do not run in the default path.
+    FXAA runs on the tonemapped LDR (cheap; no extra rays). A 256² sun
+    shadow map and a true shadow-ray pass are opt-in pretty/debug knobs —
+    they do not run in the default path.
     """
 
     def __init__(
@@ -52,6 +53,7 @@ class RaycastPBRCamera:
         ssao_radius: float = 0.08,
         contact_shadows_enabled: bool = True,
         contact_shadow_length: float = 0.08,
+        fxaa_enabled: bool = True,
         smooth_normals: bool = True,
         shadow_map_enabled: bool = False,
         shadow_map_size: int = 256,
@@ -80,6 +82,7 @@ class RaycastPBRCamera:
         self.ssao_radius = float(ssao_radius)
         self.contact_shadows_enabled = bool(contact_shadows_enabled)
         self.contact_shadow_length = float(contact_shadow_length)
+        self.fxaa_enabled = bool(fxaa_enabled)
         self.smooth_normals = bool(smooth_normals)
         self.shadow_map_enabled = bool(shadow_map_enabled)
         self.shadow_map_size = int(shadow_map_size)
@@ -602,6 +605,8 @@ class RaycastPBRCamera:
             hdr = torch.where(gb["mask"].unsqueeze(-1), hdr * ao.unsqueeze(-1), hdr)
 
         rgb = aces_tonemap(hdr, exposure=self.exposure)
+        if self.fxaa_enabled:
+            rgb = fxaa(rgb)
         gb["sun_visibility"] = vis
         if return_hdr and return_gbuffer:
             return rgb, gb["depth"], gb["mask"], hdr, gb

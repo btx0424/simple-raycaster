@@ -1,4 +1,4 @@
-"""PyTorch PBR + SSAO + ACES. Differentiable w.r.t. G-buffer/materials if they require grad."""
+"""PyTorch PBR + SSAO + FXAA + ACES. Differentiable w.r.t. G-buffer/materials if they require grad."""
 
 from __future__ import annotations
 
@@ -90,6 +90,95 @@ def aces_tonemap(hdr: torch.Tensor, exposure: float = 1.0) -> torch.Tensor:
     x = hdr * float(exposure)
     a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
     return ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+
+
+def fxaa(
+    rgb: torch.Tensor,
+    *,
+    edge_threshold: float = 0.166,
+    edge_threshold_min: float = 0.0833,
+    subpix: float = 0.75,
+) -> torch.Tensor:
+    """FXAA on LDR RGB ``[N,H,W,3]`` (Lottes console-quality).
+
+    Softens silhouette stairs after tonemap. Flat regions early-out. Uses
+    padded slices + ``grid_sample`` (no extra mesh rays).
+    """
+    if rgb.ndim != 4 or rgb.shape[-1] != 3:
+        raise ValueError(f"fxaa expects [N,H,W,3], got {tuple(rgb.shape)}")
+
+    # NCHW for pad / grid_sample.
+    x = rgb.permute(0, 3, 1, 2).contiguous()
+    n, _, h, w = x.shape
+    luma = (0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]).contiguous()
+
+    def neigh(img: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
+        """``out[y,x] = img[y+dy, x+dx]`` with replicate borders."""
+        pt, pb = max(-dy, 0), max(dy, 0)
+        pl, pr = max(-dx, 0), max(dx, 0)
+        padded = torch.nn.functional.pad(img, (pl, pr, pt, pb), mode="replicate")
+        return padded[:, :, pt + dy : pt + dy + h, pl + dx : pl + dx + w]
+
+    luma_nw = neigh(luma, -1, -1)
+    luma_n = neigh(luma, -1, 0)
+    luma_ne = neigh(luma, -1, 1)
+    luma_w = neigh(luma, 0, -1)
+    luma_m = luma
+    luma_e = neigh(luma, 0, 1)
+    luma_sw = neigh(luma, 1, -1)
+    luma_s = neigh(luma, 1, 0)
+    luma_se = neigh(luma, 1, 1)
+
+    luma_min = luma_m
+    for t in (luma_n, luma_s, luma_w, luma_e):
+        luma_min = torch.minimum(luma_min, t)
+    luma_max = luma_m
+    for t in (luma_n, luma_s, luma_w, luma_e):
+        luma_max = torch.maximum(luma_max, t)
+    luma_range = luma_max - luma_min
+    early = luma_range < torch.maximum(
+        torch.full_like(luma_range, float(edge_threshold_min)),
+        luma_max * float(edge_threshold),
+    )
+
+    dir_x = -((luma_nw + luma_ne) - (luma_sw + luma_se))
+    dir_y = (luma_nw + luma_sw) - (luma_ne + luma_se)
+    dir_reduce = torch.maximum(
+        (luma_nw + luma_ne + luma_sw + luma_se) * (0.25 * 0.25),
+        torch.full_like(luma_m, 1.0 / 128.0),
+    )
+    dir_min = 1.0 / (torch.minimum(dir_x.abs(), dir_y.abs()) + dir_reduce)
+    dir_x = (dir_x * dir_min).clamp(-8.0, 8.0)
+    dir_y = (dir_y * dir_min).clamp(-8.0, 8.0)
+
+    ys = torch.arange(h, device=x.device, dtype=x.dtype)
+    xs = torch.arange(w, device=x.device, dtype=x.dtype)
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+    base_x = (grid_x + 0.5) / float(w) * 2.0 - 1.0
+    base_y = (grid_y + 0.5) / float(h) * 2.0 - 1.0
+    base = torch.stack([base_x, base_y], dim=-1).unsqueeze(0).expand(n, -1, -1, -1)
+
+    def sample_offset(ox: torch.Tensor, oy: torch.Tensor) -> torch.Tensor:
+        gx = base[..., 0] + ox.squeeze(1) / float(w) * 2.0
+        gy = base[..., 1] + oy.squeeze(1) / float(h) * 2.0
+        grid = torch.stack([gx, gy], dim=-1)
+        return torch.nn.functional.grid_sample(
+            x, grid, mode="bilinear", padding_mode="border", align_corners=False
+        )
+
+    rgb_a = 0.5 * (
+        sample_offset(dir_x * 0.5, dir_y * 0.5) + sample_offset(dir_x * -0.5, dir_y * -0.5)
+    )
+    rgb_b = rgb_a * 0.5 + 0.25 * (
+        sample_offset(dir_x, dir_y) + sample_offset(dir_x * -1.0, dir_y * -1.0)
+    )
+
+    luma_b = 0.2126 * rgb_b[:, 0:1] + 0.7152 * rgb_b[:, 1:2] + 0.0722 * rgb_b[:, 2:3]
+    use_b = (luma_b >= luma_min) & (luma_b <= luma_max)
+    filtered = torch.where(use_b, rgb_b, rgb_a)
+    amount = (~early).float() * float(subpix)
+    out = x * (1.0 - amount) + filtered * amount
+    return out.permute(0, 2, 3, 1).contiguous()
 
 
 def ssao(

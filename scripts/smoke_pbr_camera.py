@@ -19,6 +19,7 @@ import warp as wp
 from simple_raycaster import RaycastCamera, RaycastPBRCamera, default_hdri_path
 from simple_raycaster.pbr.hdri import load_radiance_hdr
 from simple_raycaster.pbr.materials import g1_roughness_metallic, materials_for_names
+from simple_raycaster.pbr.shade import fxaa
 
 G1_XML = (
     "/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/"
@@ -289,6 +290,39 @@ def _assert_smooth_normals(
     print(f"smooth_normals {w}x{h} err={float(err_s):.4f} face_err={float(err_f):.4f}")
 
 
+def _assert_fxaa(device: str, out: Path) -> None:
+    """Checkerboard: FXAA must soften edges and leave flat tiles nearly unchanged."""
+    h = w = 64
+    ys, xs = torch.meshgrid(
+        torch.arange(h, device=device),
+        torch.arange(w, device=device),
+        indexing="ij",
+    )
+    tile = ((xs // 8) + (ys // 8)) % 2 == 0
+    img = torch.where(
+        tile.unsqueeze(0).unsqueeze(-1),
+        torch.tensor([0.9, 0.9, 0.9], device=device),
+        torch.tensor([0.1, 0.1, 0.1], device=device),
+    ).expand(1, h, w, 3).contiguous()
+    aa = fxaa(img)
+    # Flat tile interiors (away from 8px boundaries) stay put.
+    flat = aa[0, 10:14, 10:14]
+    src = img[0, 10:14, 10:14]
+    if float((flat - src).abs().max()) > 1e-4:
+        raise SystemExit(f"FXAA moved a flat tile: max|Δ|={float((flat - src).abs().max()):.3e}")
+    # Across a vertical edge, luma contrast must drop.
+    edge_x = 8
+    before = (img[0, :, edge_x] - img[0, :, edge_x - 1]).abs().mean()
+    after = (aa[0, :, edge_x] - aa[0, :, edge_x - 1]).abs().mean()
+    if float(after) >= float(before) * 0.98:
+        raise SystemExit(
+            f"FXAA did not soften checker edge: before={float(before):.4f} after={float(after):.4f}"
+        )
+    _write_preview(out / "fxaa_off", img[0])
+    _write_preview(out / "fxaa_on", aa[0])
+    print(f"fxaa edge_delta {float(before):.4f} -> {float(after):.4f}")
+
+
 def _assert_g1_materials() -> None:
     r_ank, m_ank = g1_roughness_metallic("left_ankle_roll_link")
     r_hip, m_hip = g1_roughness_metallic("left_hip_pitch_link")
@@ -503,6 +537,7 @@ def main() -> None:
     out = Path(args.out)
     size_kw = dict(width=width, height=height)
     _assert_g1_materials()
+    _assert_fxaa(device, out)
     _assert_lambert_parity(device, out, **size_kw)
     _assert_vertex_colors(device, out, **size_kw)
     _assert_smooth_normals(device, **size_kw)

@@ -27,6 +27,7 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
    - Diffuse IBL from SH, specular IBL from mips
    - SSAO from planar depth (no extra mesh ray)
    - ACES tonemap + exposure
+   - FXAA on LDR RGB (default on; no extra rays)
    - Misses sample the HDRI along the camera ray
 4. Bundled test HDRI: `pbr/assets/poly_haven_studio_1k.hdr`
    (Poly Haven, CC0, 1K — enough for SH + IBL).
