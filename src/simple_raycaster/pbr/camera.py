@@ -16,6 +16,7 @@ from .hdri import EnvironmentHDRI, default_hdri_path
 from .kernels import raycast_gbuffer_kernel, raycast_ortho_depth_kernel, shadow_ray_kernel
 from .materials import materials_for_names, pack_vertex_attrs, pack_vertex_attrs_from_wp
 from .shade import aces_tonemap, contact_shadows, fxaa, sample_shadow_map, shade_pbr, ssao
+from .tiled_filters import fxaa_tiled, ssao_tiled
 
 
 class RaycastPBRCamera:
@@ -29,6 +30,9 @@ class RaycastPBRCamera:
     Use ``quality="pretty"`` for dumps / viewers (SSAO + 128² sun shadow map).
     Contact shadows and shadow rays stay opt-in; contact alone is a poor
     shadow proxy (see ``_pbr_camera.md`` probe).
+
+    ``fxaa_impl`` / ``ssao_impl``: ``"tiled"`` (default, Warp shared-memory
+    tiles) or ``"torch"`` (reference PyTorch path).
     """
 
     def __init__(
@@ -56,6 +60,8 @@ class RaycastPBRCamera:
         contact_shadows_enabled: bool | None = None,
         contact_shadow_length: float = 0.08,
         fxaa_enabled: bool = True,
+        fxaa_impl: str = "tiled",
+        ssao_impl: str = "tiled",
         smooth_normals: bool = True,
         shadow_map_enabled: bool | None = None,
         shadow_map_size: int = 128,
@@ -99,6 +105,14 @@ class RaycastPBRCamera:
         self.contact_shadows_enabled = bool(contact_shadows_enabled)
         self.contact_shadow_length = float(contact_shadow_length)
         self.fxaa_enabled = bool(fxaa_enabled)
+        fxaa_i = str(fxaa_impl).lower().strip()
+        ssao_i = str(ssao_impl).lower().strip()
+        if fxaa_i not in ("tiled", "torch"):
+            raise ValueError(f"fxaa_impl must be 'tiled' or 'torch', got {fxaa_impl!r}")
+        if ssao_i not in ("tiled", "torch"):
+            raise ValueError(f"ssao_impl must be 'tiled' or 'torch', got {ssao_impl!r}")
+        self.fxaa_impl = fxaa_i
+        self.ssao_impl = ssao_i
         self.smooth_normals = bool(smooth_normals)
         self.shadow_map_enabled = bool(shadow_map_enabled)
         self.shadow_map_size = int(shadow_map_size)
@@ -621,20 +635,34 @@ class RaycastPBRCamera:
         hdr = torch.where(gb["mask"].unsqueeze(-1), hdr, bg)
 
         if self.ssao_enabled:
-            ao = ssao(
-                planar,
-                gb["mask"],
-                fx=fx,
-                fy=fy,
-                cx=cx,
-                cy=cy,
-                radius=self.ssao_radius,
-            )
+            if self.ssao_impl == "tiled":
+                ao = ssao_tiled(
+                    planar,
+                    gb["mask"],
+                    fx=fx,
+                    fy=fy,
+                    cx=cx,
+                    cy=cy,
+                    radius=self.ssao_radius,
+                )
+            else:
+                ao = ssao(
+                    planar,
+                    gb["mask"],
+                    fx=fx,
+                    fy=fy,
+                    cx=cx,
+                    cy=cy,
+                    radius=self.ssao_radius,
+                )
             hdr = torch.where(gb["mask"].unsqueeze(-1), hdr * ao.unsqueeze(-1), hdr)
 
         rgb = aces_tonemap(hdr, exposure=self.exposure)
         if self.fxaa_enabled:
-            rgb = fxaa(rgb)
+            if self.fxaa_impl == "tiled":
+                rgb = fxaa_tiled(rgb)
+            else:
+                rgb = fxaa(rgb)
         gb["sun_visibility"] = vis
         if return_hdr and return_gbuffer:
             return rgb, gb["depth"], gb["mask"], hdr, gb
