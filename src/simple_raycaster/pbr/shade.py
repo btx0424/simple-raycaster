@@ -1,0 +1,124 @@
+"""PyTorch PBR + SSAO + ACES. Differentiable w.r.t. G-buffer/materials if they require grad."""
+
+from __future__ import annotations
+
+import math
+
+import torch
+
+from .hdri import EnvironmentHDRI
+
+_PI = math.pi
+
+
+def _fresnel_schlick(cos_theta: torch.Tensor, f0: torch.Tensor) -> torch.Tensor:
+    t = (1.0 - cos_theta.clamp(0.0, 1.0)).unsqueeze(-1)
+    return f0 + (1.0 - f0) * t.pow(5.0)
+
+
+def _d_ggx(n_dot_h: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    a2 = a * a
+    d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0
+    return a2 / (_PI * d * d).clamp_min(1e-8)
+
+
+def _g_smith(n_dot_v: torch.Tensor, n_dot_l: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    r = a + 1.0
+    k = (r * r) / 8.0
+
+    def g1(nd: torch.Tensor) -> torch.Tensor:
+        return nd / (nd * (1.0 - k) + k).clamp_min(1e-8)
+
+    return g1(n_dot_v) * g1(n_dot_l)
+
+
+def shade_pbr(
+    albedo: torch.Tensor,
+    normal_w: torch.Tensor,
+    view_w: torch.Tensor,
+    roughness: torch.Tensor,
+    metallic: torch.Tensor,
+    env: EnvironmentHDRI,
+    *,
+    sun_dir_w: torch.Tensor,
+    sun_intensity: float = 2.5,
+    sun_color: tuple[float, float, float] = (1.0, 0.98, 0.92),
+) -> torch.Tensor:
+    """Linear HDR RGB. ``albedo/normal/view [... 3]``, ``roughness/metallic [...]``."""
+    n = normal_w / normal_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    v = view_w / view_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    l = sun_dir_w / sun_dir_w.norm().clamp_min(1e-8)
+    h = l + v
+    h = h / h.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    n_dot_l = (n * l).sum(-1).clamp(0.0, 1.0)
+    n_dot_v = (n * v).sum(-1).clamp(1e-4, 1.0)
+    n_dot_h = (n * h).sum(-1).clamp(0.0, 1.0)
+    v_dot_h = (v * h).sum(-1).clamp(0.0, 1.0)
+
+    a = roughness.clamp(0.04, 1.0).pow(2)
+    f0 = 0.04 * (1.0 - metallic.unsqueeze(-1)) + albedo * metallic.unsqueeze(-1)
+    f = _fresnel_schlick(v_dot_h, f0)
+    d = _d_ggx(n_dot_h, a)
+    g = _g_smith(n_dot_v, n_dot_l, a)
+    spec_sun = (d * g).unsqueeze(-1) * f / (4.0 * n_dot_v * n_dot_l).unsqueeze(-1).clamp_min(1e-4)
+    spec_sun = spec_sun * n_dot_l.unsqueeze(-1)
+
+    kd = (1.0 - f) * (1.0 - metallic.unsqueeze(-1))
+    sun = sun_intensity * torch.tensor(sun_color, device=albedo.device, dtype=albedo.dtype)
+    diff_sun = kd * albedo * (n_dot_l.unsqueeze(-1) / _PI)
+
+    irr = env.irradiance(n)
+    diff_ibl = kd * albedo * irr
+
+    r = (2.0 * n_dot_v.unsqueeze(-1) * n - v)
+    spec_env = env.sample(r, roughness=roughness)
+    fresnel_v = _fresnel_schlick(n_dot_v, f0)
+    spec_ibl = spec_env * (fresnel_v * (1.0 - roughness.unsqueeze(-1)) + 0.04)
+
+    return diff_sun * sun + spec_sun * sun + diff_ibl + spec_ibl
+
+
+def aces_tonemap(hdr: torch.Tensor, exposure: float = 1.0) -> torch.Tensor:
+    x = hdr * float(exposure)
+    a, b, c, d, e = 2.51, 0.03, 2.43, 0.59, 0.14
+    return ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+
+
+def ssao(
+    depth: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    n_samples: int = 8,
+    radius: float = 0.12,
+    bias: float = 0.004,
+) -> torch.Tensor:
+    """Screen-space AO from OpenCV *planar* depth. Returns ``[N,H,W]`` in ``[0,1]``."""
+    del cx, cy
+    n, h, w = depth.shape
+    device = depth.device
+    ys, xs = torch.meshgrid(
+        torch.arange(h, device=device, dtype=torch.float32),
+        torch.arange(w, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+    z = depth
+    ang = torch.linspace(0.0, 2.0 * math.pi, n_samples + 1, device=device)[:-1]
+    rad = torch.linspace(0.35, 1.0, n_samples, device=device)
+    ao = torch.zeros(n, h, w, device=device, dtype=depth.dtype)
+    bidx = torch.arange(n, device=device)[:, None, None]
+    for s in range(n_samples):
+        px = (radius * rad[s] * fx) / z.clamp_min(1e-3) * torch.cos(ang[s])
+        py = (radius * rad[s] * fy) / z.clamp_min(1e-3) * torch.sin(ang[s])
+        xi = (xs + px).round().long().clamp(0, w - 1).expand(n, -1, -1)
+        yi = (ys + py).round().long().clamp(0, h - 1).expand(n, -1, -1)
+        z2 = depth[bidx, yi, xi]
+        closer = (z - z2) > bias
+        fade = (1.0 - (z - z2).abs() / radius).clamp(0.0, 1.0)
+        ao = ao + closer.float() * fade
+    ao = (1.0 - ao / float(n_samples)).clamp(0.15, 1.0)
+    return torch.where(mask, ao, torch.ones_like(ao))

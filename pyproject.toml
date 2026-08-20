@@ -38,3 +38,6 @@ viz = ["pyglet<2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"simple_raycaster.pbr" = ["assets/*.hdr", "assets/*.md"]
