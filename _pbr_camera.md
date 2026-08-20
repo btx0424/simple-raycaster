@@ -41,6 +41,9 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
 - [x] Per-mesh roughness/metallic tables for G1 (`pbr/materials.py`):
       rubber ankles/feet, painted-metal links, plastic hands.
       Applied when `bind_*` is given `names=` (or `raycaster.mesh_names`).
+- [x] **MuJoCo `geom_rgba` → albedo** (`utils_mjc.body_mesh_albedo`,
+      `MultiMeshRaycaster.mesh_albedos`). STLs have no vertex colors; appearance
+      lives on the geom. `bind_meshes` picks this up when `albedos=` is omitted.
 - [x] `return_gbuffer=True` for real2sim (detach hits, optimize
       albedo/rough/metal + SH). Hits stay `enable_backward=False`.
 
