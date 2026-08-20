@@ -254,6 +254,9 @@ on the base camera; SSGI knobs (`ssgi_radius` / `thickness` / `intensity` /
 Smoke writes ``g1_ssgi.png`` next to ``g1_pbr.png`` (same pose / meshes /
 shadow map). This is short-range screen-space GI, not full SSR + denoise.
 
+Quick N=1 @ 128×96 (cached kernels): pretty+SSAO ~3.5 ms, pretty+SSGI ~3.0 ms
+(SSGI is in the same ballpark; tile halo fits the short march well).
+
 ### Next iteration candidates
 
 - Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``).
