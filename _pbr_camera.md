@@ -106,8 +106,9 @@ Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
 | 1024 | 10.28 | 10.43 | 63.68 | **120.93** | — | — |
 
 Times are ms/iter. **default** = GGX + HDRI + SSAO + contact shadows.
-**shade** = GGX + HDRI only. **+smap** / **+sray** are the Phase 3 knobs
-(`shadow_map_enabled` / `shadow_rays`). Peak torch mem for default is
+**shade** = GGX + HDRI only. **+smap** is default plus the 256² sun
+shadow map. **+sray** is shade plus a closest-hit sun ray (no SSAO /
+contact, so the extra ray is visible). Peak torch mem for default is
 ~367 MB at N=64 and ~4.8 GB at N=1024.
 
 Takeaways:
