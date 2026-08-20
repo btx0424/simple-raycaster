@@ -195,12 +195,18 @@ class RaycastCamera:
         self.meshes_array = None
         self.initialized = False
         n = len(self.meshes_wp)
-        self._albedo_t = (
-            torch.tensor(self.default_albedo, device=self.torch_device, dtype=torch.float32)
-            .expand(n, 3)
-            .contiguous()
-            .clone()
-        )
+        src_alb = getattr(raycaster, "mesh_albedos", None)
+        if src_alb is not None and len(src_alb) == n:
+            self._albedo_t = torch.as_tensor(
+                src_alb, device=self.torch_device, dtype=torch.float32
+            ).reshape(n, 3).contiguous()
+        else:
+            self._albedo_t = (
+                torch.tensor(self.default_albedo, device=self.torch_device, dtype=torch.float32)
+                .expand(n, 3)
+                .contiguous()
+                .clone()
+            )
         self._albedo_wp = None
         self._pose_entity = None
         self._pose_body_ids = None

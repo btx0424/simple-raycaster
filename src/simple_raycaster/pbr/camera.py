@@ -207,6 +207,10 @@ class RaycastPBRCamera:
     ) -> None:
         self.geom.bind_meshes(raycaster)
         n = self.geom.n_meshes
+        if albedos is None:
+            src_alb = getattr(raycaster, "mesh_albedos", None)
+            if src_alb is not None and len(src_alb) == n:
+                albedos = src_alb
         if albedos is not None:
             alb = torch.as_tensor(albedos, device=self.geom.torch_device, dtype=torch.float32)
             alb = alb.reshape(-1, 3)

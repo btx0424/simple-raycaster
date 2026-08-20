@@ -152,7 +152,7 @@ def load_scene(
     mesh_names = list(g1.mesh_names or [])
     name_to_id = {model.body(i).name: i for i in range(model.nbody)}
 
-    # Keep soles clearly above the ground top (z=0). White feet on a white
+    # Keep soles clearly above the ground top (z=0). Dark feet on a light
     # plane look "sunk" when coplanar even if the BVH hits are correct.
     foot_clearance = 0.03
     z_min = np.inf
@@ -184,20 +184,42 @@ def load_scene(
     cube = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
     cube.apply_translation((0.45, 0.0, 0.25 + foot_clearance))
     static_meshes: list = [ground, cube]
+    # Authored-looking static albedos (not from MuJoCo).
+    static_albedos = np.asarray(
+        [[0.38, 0.38, 0.36], [0.78, 0.28, 0.16]], dtype=np.float32
+    )
     if cube_first:
         static_meshes = [cube, ground]
+        static_albedos = static_albedos[[1, 0]]
     if merge_static:
         static_meshes = [trimesh.util.concatenate(static_meshes)]
+        static_albedos = np.mean(static_albedos, axis=0, keepdims=True).astype(np.float32)
     n_static = len(static_meshes)
+    g1_albedos = np.asarray(getattr(g1, "mesh_albedos"), dtype=np.float32).reshape(-1, 3)
+    if g1_albedos.shape[0] != len(mesh_names):
+        raise RuntimeError(
+            f"G1 mesh_albedos {g1_albedos.shape[0]} != mesh_names {len(mesh_names)}"
+        )
 
     if robot_first:
         meshes = [*g1.meshes_wp, *static_meshes]
+        mesh_albedos = np.concatenate([g1_albedos, static_albedos], axis=0)
     else:
         meshes = [*static_meshes, *g1.meshes_wp]
+        mesh_albedos = np.concatenate([static_albedos, g1_albedos], axis=0)
     raycaster = MultiMeshRaycaster(
         meshes,
         device=device,
         bvh_constructor=bvh_constructor,
+    )
+    raycaster.mesh_albedos = mesh_albedos
+    raycaster.mesh_names = (
+        [*mesh_names, *(["ground", "cube"][:n_static] if not merge_static else ["static"])]
+        if robot_first
+        else [
+            *(["ground", "cube"][:n_static] if not merge_static else ["static"]),
+            *mesh_names,
+        ]
     )
     stats = {
         "g1_xml": xml_path,
@@ -206,6 +228,7 @@ def load_scene(
         "n_points": raycaster.n_points,
         "n_faces": raycaster.n_faces,
         "g1_names": mesh_names,
+        "albedos": mesh_albedos,
         "bvh_constructor": bvh_constructor or "default(lbvh)",
         "merge_static": merge_static,
         "robot_first": robot_first,

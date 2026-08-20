@@ -501,16 +501,14 @@ def _maybe_g1_preview(
         shadow_map_extent=2.2,
     )
     lambert = RaycastCamera(**cam_kw)
-    alb = None
-    if names is not None and raycaster.n_meshes >= 2:
-        alb = np.tile(np.array([0.65, 0.65, 0.65], dtype=np.float32), (raycaster.n_meshes, 1))
-        alb[0] = (0.38, 0.38, 0.36)  # darker ground — white feet read on top
-        alb[1] = (0.78, 0.28, 0.16)
+    # MuJoCo geom rgba (via load_scene mesh_albedos) — do not paint over with gray.
+    alb = np.asarray(stats.get("albedos"), dtype=np.float32).reshape(-1, 3)
+    if alb.shape[0] != raycaster.n_meshes:
+        raise SystemExit(
+            f"g1 preview albedo count {alb.shape[0]} != n_meshes {raycaster.n_meshes}"
+        )
     pbr.bind_meshes(raycaster, names=names, albedos=alb)
     lambert.bind_meshes(raycaster)
-    if alb is not None:
-        lambert._albedo_t = torch.as_tensor(alb, device=lambert.torch_device, dtype=torch.float32)
-        lambert._albedo_wp = None
     pose_kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
     rgb_p, depth_p, mask_p = pbr.render(cam_pos, cam_quat, **pose_kw)
     rgb_l, depth_l, mask_l = lambert.render(cam_pos, cam_quat, **pose_kw)

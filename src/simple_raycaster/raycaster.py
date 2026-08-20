@@ -726,10 +726,11 @@ class MultiMeshRaycaster:
             simplify_factor: The factor to simplify the meshes. 0.0 means no simplification.
                 If a single float is provided, it will be used for all meshes.
         """
-        from .utils_mjc import get_trimesh_from_body
+        from .utils_mjc import body_mesh_albedo, get_trimesh_from_body
         
         mesh_names = []
         meshes_wp = []
+        mesh_albedos = []
 
         n_verts_before = 0
         n_verts_after = 0
@@ -751,6 +752,7 @@ class MultiMeshRaycaster:
             n_faces_after += mesh.faces.shape[0]
 
             mesh_names.append(body.name)
+            mesh_albedos.append(body_mesh_albedo(body, model))
             meshes_wp.append(
                 trimesh2wp(
                     mesh,
@@ -770,4 +772,5 @@ class MultiMeshRaycaster:
             bvh_leaf_size=bvh_leaf_size,
         )
         inst.mesh_names = mesh_names
+        inst.mesh_albedos = np.asarray(mesh_albedos, dtype=np.float32).reshape(-1, 3)
         return inst
