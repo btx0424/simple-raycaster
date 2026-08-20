@@ -152,6 +152,21 @@ def load_scene(
     mesh_names = list(g1.mesh_names or [])
     name_to_id = {model.body(i).name: i for i in range(model.nbody)}
 
+    # Keep soles a few mm above the ground top (z=0) so coplanar hits do not
+    # carve the ankles out of the image.
+    foot_clearance = 0.01
+    z_min = np.inf
+    for i, name in enumerate(mesh_names):
+        bid = name_to_id[name]
+        pos = np.asarray(data.xpos[bid], dtype=np.float64)
+        quat = np.asarray(data.xquat[bid], dtype=np.float64)  # wxyz
+        pts = g1.meshes_wp[i].points.numpy().astype(np.float64)
+        rot = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_matrix()
+        z_min = min(z_min, float((pts @ rot.T + pos)[:, 2].min()))
+    if np.isfinite(z_min) and z_min < foot_clearance and model.nq >= 7:
+        data.qpos[2] = float(data.qpos[2]) + (foot_clearance - z_min)
+        mujoco.mj_forward(model, data)
+
     g1_pos = torch.tensor(
         np.stack([data.xpos[name_to_id[name]] for name in mesh_names], axis=0),
         device=device,
@@ -165,8 +180,9 @@ def load_scene(
 
     ground = trimesh.creation.box(extents=(10.0, 10.0, 0.05))
     ground.apply_translation((0.0, 0.0, -0.025))
+    # Bottom of the 0.5 m cube sits 1 cm above the ground top (same clearance).
     cube = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
-    cube.apply_translation((0.45, 0.0, 0.25))
+    cube.apply_translation((0.45, 0.0, 0.26))
     static_meshes: list = [ground, cube]
     if cube_first:
         static_meshes = [cube, ground]

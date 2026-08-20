@@ -316,7 +316,7 @@ def _assert_contact_and_shadows(
     cam_pos = torch.tensor(eye, device=device).view(1, 3)
     cam_quat = torch.tensor(quat, device=device).view(1, 4)
     mesh_pos = torch.tensor(
-        [[[0.0, 0.0, -0.02], [0.15, 0.0, 0.20]]],
+        [[[0.0, 0.0, -0.02], [0.15, 0.0, 0.21]]],
         device=device,
     )
     mesh_quat = torch.tensor([[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]], device=device)
@@ -408,10 +408,23 @@ def _maybe_g1_preview(
     if len(names) != raycaster.n_meshes:
         names = None
     eye, quats = bench.sample_cameras(
-        1, seed=0, radius_min=1.6, radius_max=1.6, elev_min_deg=18.0, elev_max_deg=18.0
+        1, seed=0, radius_min=1.8, radius_max=1.8, elev_min_deg=22.0, elev_max_deg=22.0
     )
     cam_pos = torch.as_tensor(eye, device=device, dtype=torch.float32)
-    cam_quat = torch.as_tensor(quats, device=device, dtype=torch.float32)
+    # Look at mid-torso once the free joint is raised to standing height.
+    target = np.array([0.0, 0.0, 0.55], dtype=np.float64)
+    cam_quat = torch.as_tensor(
+        np.stack(
+            [
+                bench.look_at_opencv_wxyz(
+                    eye[i].astype(np.float64), target, np.array([0.0, 0.0, 1.0])
+                )
+                for i in range(len(eye))
+            ]
+        ),
+        device=device,
+        dtype=torch.float32,
+    )
     mesh_pos, mesh_quat = bench.expand_poses(1, g1_pos, g1_quat, n_static, robot_first=False)
     w, h = _size(width, height, 128, 96)
     pbr = RaycastPBRCamera(
