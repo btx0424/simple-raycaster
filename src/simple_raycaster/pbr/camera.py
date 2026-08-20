@@ -19,16 +19,15 @@ from .shade import aces_tonemap, contact_shadows, fxaa, sample_shadow_map, shade
 
 
 class RaycastPBRCamera:
-    """Closest-hit G-buffer + PyTorch PBR / HDRI / SSAO.
+    """Closest-hit G-buffer + PyTorch PBR / HDRI.
 
     Bind geometry the same way as :class:`RaycastCamera`. ``render`` returns
     the same ``(rgb, depth, mask)`` shapes so it can be A/B'd against Lambert.
     RGB is ACES-tonemapped LDR; linear HDR is available via ``return_hdr=True``.
 
-    Screen-space contact shadows (no extra mesh ray) are on by default.
-    FXAA runs on the tonemapped LDR (cheap; no extra rays). A 256² sun
-    shadow map and a true shadow-ray pass are opt-in pretty/debug knobs —
-    they do not run in the default path.
+    Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA (no SSAO / contact).
+    Use ``quality="pretty"`` for dumps / viewers (SSAO + contact shadows).
+    Shadow map and shadow rays stay opt-in debug/pretty knobs.
     """
 
     def __init__(
@@ -49,9 +48,10 @@ class RaycastPBRCamera:
         sun_dir: tuple[float, float, float] = (0.45, -0.35, 0.82),
         sun_intensity: float = 2.5,
         exposure: float = 0.85,
-        ssao_enabled: bool = True,
+        quality: str = "fast",
+        ssao_enabled: bool | None = None,
         ssao_radius: float = 0.08,
-        contact_shadows_enabled: bool = True,
+        contact_shadows_enabled: bool | None = None,
         contact_shadow_length: float = 0.08,
         fxaa_enabled: bool = True,
         smooth_normals: bool = True,
@@ -62,6 +62,15 @@ class RaycastPBRCamera:
         shadow_rays: bool = False,
         shadow_ray_tmax: float = 8.0,
     ) -> None:
+        q = str(quality).lower().strip()
+        if q not in ("fast", "pretty"):
+            raise ValueError(f"quality must be 'fast' or 'pretty', got {quality!r}")
+        pretty = q == "pretty"
+        if ssao_enabled is None:
+            ssao_enabled = pretty
+        if contact_shadows_enabled is None:
+            contact_shadows_enabled = pretty
+
         self.geom = RaycastCamera(
             width,
             height,
@@ -73,6 +82,7 @@ class RaycastPBRCamera:
             device=device,
             default_albedo=default_albedo,
         )
+        self.quality = q
         self.default_roughness = float(default_roughness)
         self.default_metallic = float(default_metallic)
         self.sun_dir = tuple(float(x) for x in sun_dir)

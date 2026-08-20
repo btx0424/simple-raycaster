@@ -1,9 +1,11 @@
 """Sweep ``RaycastPBRCamera`` vs Lambert ``RaycastCamera`` over camera count N.
 
 G1 scene matches ``scripts/bench_g1_camera.py`` (ground + cube + Inspire G1).
+Headline batch for RL is **N=256**.
 
     .venv/bin/python scripts/bench_pbr_camera.py
-    .venv/bin/python scripts/bench_pbr_camera.py --n 1,8,64,256 --width 128 --height 96
+    .venv/bin/python scripts/bench_pbr_camera.py --n 64,256,512
+    .venv/bin/python scripts/bench_pbr_camera.py --pretty --shadow-map
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ def _scene_names(stats: dict) -> list[str]:
 
 
 def _make_lambert(args, device: str) -> RaycastCamera:
-    cam = RaycastCamera(
+    return RaycastCamera(
         args.width,
         args.height,
         fov_y_deg=args.fov,
@@ -64,7 +66,6 @@ def _make_lambert(args, device: str) -> RaycastCamera:
         depth_mode="planar",
         device=device,
     )
-    return cam
 
 
 def _make_pbr(args, device: str, env: EnvironmentHDRI, **overrides) -> RaycastPBRCamera:
@@ -78,8 +79,7 @@ def _make_pbr(args, device: str, env: EnvironmentHDRI, **overrides) -> RaycastPB
         depth_mode="planar",
         device=device,
         hdri=env,
-        ssao_enabled=True,
-        contact_shadows_enabled=True,
+        quality="fast",
         shadow_map_enabled=False,
         shadow_rays=False,
     )
@@ -100,7 +100,12 @@ def _clear_work(cam) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--xml", type=str, default=DEFAULT_G1_XML)
-    parser.add_argument("--n", type=_parse_n_list, default=_parse_n_list("1,8,16,64,256"))
+    parser.add_argument(
+        "--n",
+        type=_parse_n_list,
+        default=_parse_n_list("256"),
+        help="Camera counts to time (default: 256, the RL headline batch)",
+    )
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--height", type=int, default=96)
     parser.add_argument("--fov", type=float, default=70.0)
@@ -110,6 +115,11 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Also time quality=pretty (SSAO + contact, 4-tap)",
+    )
     parser.add_argument("--shadow-map", action="store_true", help="Also time 256² sun shadow map")
     parser.add_argument("--shadow-rays", action="store_true", help="Also time closest-hit sun shadow rays")
     parser.add_argument("--json-out", type=str, default="")
@@ -127,7 +137,7 @@ def main() -> None:
     names = _scene_names(stats)
 
     print("=" * 78)
-    print("PBR CAMERA N-SWEEP")
+    print("PBR CAMERA N-SWEEP  (headline N=256 for parallel RL)")
     print("=" * 78)
     print(f"warp {wp.__version__}  torch {torch.__version__}  gpu {torch.cuda.get_device_name(0)}")
     print(f"xml  {stats['g1_xml']}")
@@ -146,28 +156,27 @@ def main() -> None:
     env = EnvironmentHDRI.from_path(default_hdri_path(), device=torch_device)
     lambert = _make_lambert(args, device)
     lambert.bind_meshes(raycaster)
-    pbr_default = _make_pbr(args, device, env)
-    pbr_default.bind_meshes(raycaster, names=names)
-    pbr_shade = _make_pbr(
-        args, device, env, ssao_enabled=False, contact_shadows_enabled=False
-    )
-    pbr_shade.bind_meshes(raycaster, names=names)
-    pbr_gbuf = _make_pbr(
-        args, device, env, ssao_enabled=False, contact_shadows_enabled=False
-    )
+    pbr_fast = _make_pbr(args, device, env, quality="fast")
+    pbr_fast.bind_meshes(raycaster, names=names)
+    pbr_gbuf = _make_pbr(args, device, env, quality="fast", fxaa_enabled=False)
     pbr_gbuf.bind_meshes(raycaster, names=names)
+    pbr_nofxaa = _make_pbr(args, device, env, quality="fast", fxaa_enabled=False)
+    pbr_nofxaa.bind_meshes(raycaster, names=names)
+    pbr_pretty = None
+    if args.pretty or args.shadow_map:
+        pbr_pretty = _make_pbr(args, device, env, quality="pretty")
+        pbr_pretty.bind_meshes(raycaster, names=names)
     pbr_smap = None
     pbr_sray = None
     if args.shadow_map:
-        pbr_smap = _make_pbr(args, device, env, shadow_map_enabled=True)
+        pbr_smap = _make_pbr(args, device, env, quality="pretty", shadow_map_enabled=True)
         pbr_smap.bind_meshes(raycaster, names=names)
     if args.shadow_rays:
         pbr_sray = _make_pbr(
-            args, device, env, ssao_enabled=False, contact_shadows_enabled=False, shadow_rays=True
+            args, device, env, quality="fast", fxaa_enabled=False, shadow_rays=True
         )
         pbr_sray.bind_meshes(raycaster, names=names)
 
-    # Compile kernels once on the smallest N so the sweep is not polluted.
     n0 = min(args.n)
     mesh_pos0, mesh_quat0 = expand_poses(n0, g1_pos, g1_quat, n_static)
     cam_pos0_np, cam_quat0_np = sample_cameras(
@@ -178,14 +187,14 @@ def main() -> None:
     rgb_l, depth_l, mask_l = lambert.render(
         cam_pos0, cam_quat0, mesh_pos_w=mesh_pos0, mesh_quat_w=mesh_quat0
     )
-    rgb_p, depth_p, mask_p = pbr_default.render(
+    rgb_p, depth_p, mask_p = pbr_fast.render(
         cam_pos0, cam_quat0, mesh_pos_w=mesh_pos0, mesh_quat_w=mesh_quat0
     )
     depth_err = float((depth_l - depth_p).abs().max())
     mask_frac = float(mask_p.float().mean())
     print(
         f"  warmup N={n0}: lambert rgb_mean={float(rgb_l.mean()):.3f}  "
-        f"pbr rgb_mean={float(rgb_p.mean()):.3f}  mask_frac={mask_frac:.3f}  "
+        f"pbr_fast rgb_mean={float(rgb_p.mean()):.3f}  mask_frac={mask_frac:.3f}  "
         f"depth max|Δ|={depth_err:.3e}"
     )
     if mask_frac < 0.3:
@@ -193,7 +202,7 @@ def main() -> None:
     if depth_err > 1e-4:
         print(f"  WARNING: Lambert vs PBR depth max|Δ|={depth_err:.3e} > 1e-4")
     del rgb_l, depth_l, mask_l, rgb_p, depth_p, mask_p, mesh_pos0, mesh_quat0, cam_pos0, cam_quat0
-    for cam in (lambert, pbr_default, pbr_shade, pbr_gbuf, pbr_smap, pbr_sray):
+    for cam in (lambert, pbr_fast, pbr_nofxaa, pbr_gbuf, pbr_pretty, pbr_smap, pbr_sray):
         if cam is not None:
             _clear_work(cam)
     torch.cuda.empty_cache()
@@ -237,44 +246,20 @@ def main() -> None:
         cam_quat = torch.from_numpy(cam_quat_np).to(device=torch_device)
         kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
 
+        time_path(n, "lambert", lambert, lambda: lambert.render(cam_pos, cam_quat, **kw))
         time_path(
-            n,
-            "lambert",
-            lambert,
-            lambda: lambert.render(cam_pos, cam_quat, **kw),
+            n, "pbr_gbuffer", pbr_gbuf, lambda: pbr_gbuf.render_gbuffer(cam_pos, cam_quat, **kw)
         )
-        time_path(
-            n,
-            "pbr_gbuffer",
-            pbr_gbuf,
-            lambda: pbr_gbuf.render_gbuffer(cam_pos, cam_quat, **kw),
-        )
-        time_path(
-            n,
-            "pbr_shade",
-            pbr_shade,
-            lambda: pbr_shade.render(cam_pos, cam_quat, **kw),
-        )
-        time_path(
-            n,
-            "pbr_default",
-            pbr_default,
-            lambda: pbr_default.render(cam_pos, cam_quat, **kw),
-        )
+        time_path(n, "pbr_nofxaa", pbr_nofxaa, lambda: pbr_nofxaa.render(cam_pos, cam_quat, **kw))
+        time_path(n, "pbr_fast", pbr_fast, lambda: pbr_fast.render(cam_pos, cam_quat, **kw))
+        if pbr_pretty is not None:
+            time_path(
+                n, "pbr_pretty", pbr_pretty, lambda: pbr_pretty.render(cam_pos, cam_quat, **kw)
+            )
         if pbr_smap is not None:
-            time_path(
-                n,
-                "pbr_smap",
-                pbr_smap,
-                lambda: pbr_smap.render(cam_pos, cam_quat, **kw),
-            )
+            time_path(n, "pbr_smap", pbr_smap, lambda: pbr_smap.render(cam_pos, cam_quat, **kw))
         if pbr_sray is not None:
-            time_path(
-                n,
-                "pbr_sray",
-                pbr_sray,
-                lambda: pbr_sray.render(cam_pos, cam_quat, **kw),
-            )
+            time_path(n, "pbr_sray", pbr_sray, lambda: pbr_sray.render(cam_pos, cam_quat, **kw))
 
         del mesh_pos, mesh_quat, cam_pos, cam_quat
         torch.cuda.empty_cache()
@@ -284,7 +269,10 @@ def main() -> None:
     print("\n" + "=" * 78)
     print("RESULTS")
     print("=" * 78)
-    header = f"{'N':>5} {'path':<14} {'ms/iter':>10} {'ms/cam':>8} {'Mpix/s':>8} {'cam/s':>8} {'vs L':>7} {'peak':>12}"
+    header = (
+        f"{'N':>5} {'path':<14} {'ms/iter':>10} {'ms/cam':>8} "
+        f"{'Mpix/s':>8} {'cam/s':>8} {'vs L':>7} {'peak':>12}"
+    )
     print(header)
     print("-" * len(header))
     for row in results:
@@ -294,6 +282,16 @@ def main() -> None:
             f"{row['mpix_per_s']:8.2f} {row['cams_per_s']:8.1f} {vs:6.2f}x "
             f"{format_memory(row['mem_peak']):>12}"
         )
+
+    if 256 in lambert_ms:
+        fast_rows = [r for r in results if r["n"] == 256 and r["name"] == "pbr_fast"]
+        if fast_rows:
+            r = fast_rows[0]
+            print(
+                f"\nHEADLINE N=256 pbr_fast: {r['ms_per_iter']:.3f} ms/iter  "
+                f"{r['ms_per_cam']:.3f} ms/cam  {r['cams_per_s']:.0f} cam/s  "
+                f"({r['ms_per_iter'] / lambert_ms[256]:.2f}x Lambert)"
+            )
 
     blob = {
         "warp": wp.__version__,

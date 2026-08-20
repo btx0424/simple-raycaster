@@ -189,7 +189,7 @@ def ssao(
     fy: float,
     cx: float,
     cy: float,
-    n_samples: int = 8,
+    n_samples: int = 4,
     radius: float = 0.08,
     bias: float = 0.004,
 ) -> torch.Tensor:
@@ -197,6 +197,8 @@ def ssao(
 
     ``radius`` is metres in world/camera space. ``0.08`` fits G1 ankles and a
     cube sitting on the ground; ``0.12`` is a looser living-room scale.
+    Default ``n_samples=4`` (was 8) — enough for pretty dumps; the RL path
+    leaves SSAO off.
     """
     del cx, cy
     n, h, w = depth.shape

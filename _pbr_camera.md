@@ -44,12 +44,12 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
 - [x] `return_gbuffer=True` for real2sim (detach hits, optimize
       albedo/rough/metal + SH). Hits stay `enable_backward=False`.
 
-## Phase 2 — cheap local occlusion
+## Phase 2 — cheap local occlusion (pretty mode)
 
 - [x] Screen-space **contact shadows** along the sun in the depth image
-      (`contact_shadows_enabled=True` by default; sun term only).
-- [x] SSAO radius default **0.08 m** (G1 ankles / cube on ground).
-      `0.12` is still fine for a larger room.
+      (sun term only). **Off in ``quality="fast"``** (RL default); on in
+      ``quality="pretty"``.
+- [x] SSAO radius default **0.08 m**, **4 taps** (was 8). Pretty-only.
 
 ## Phase 3 — optional visibility (pretty mode only)
 
@@ -57,6 +57,15 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
       meshes. Off by default (`shadow_map_enabled=False`).
 - [x] True shadow ray toward the sun: debug knob, default **off**
       (`shadow_rays=False`).
+
+## Quality presets
+
+| `quality` | SSAO | contact | FXAA | Use |
+| --- | --- | --- | --- | --- |
+| `"fast"` (default) | off | off | on | parallel RL / train RGB |
+| `"pretty"` | on (4-tap) | on | on | dumps / viewer |
+
+Explicit `ssao_enabled=` / `contact_shadows_enabled=` still override the preset.
 
 ## Real2sim (later)
 
