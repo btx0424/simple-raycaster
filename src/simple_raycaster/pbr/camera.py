@@ -33,7 +33,7 @@ class RaycastPBRCamera:
 
     ``fxaa_impl`` / ``ssao_impl``: ``"tiled"`` (Warp shared-memory tiles) or
     ``"torch"``. Default FXAA is tiled (~1.7× vs Torch @ N=256); default SSAO
-    stays Torch (tiled SSAO is correct but slower at 128×96 / 4 taps).
+    stays Torch (tiled SSAO is correct but slower at 192×144 / 4 taps).
     """
 
     def __init__(
