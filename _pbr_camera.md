@@ -163,8 +163,33 @@ Round-2 `pretty` = SSAO + **smap128** (refreshed bench):
 
 Similar cost to old SSAO+contact pretty (~23.5), with real shadows.
 
+### Round 3 — ``torch.compile`` on shade (N=256)
+
+Probe: `scripts/probe_pbr_compile.py` (frozen G-buffer; Warp out of the
+compiled region). Eager shade+FXAA **11.78 ms**; shade without FXAA **8.97 ms**.
+
+| mode | shade+FXAA | vs eager | shade no-FXAA | vs eager |
+| --- | ---: | ---: | ---: | ---: |
+| default | 7.85 | 1.50× | 1.85 | 4.86× |
+| reduce-overhead | 8.20 | 1.44× | 2.20 | 4.08× |
+| max-autotune | 7.90 | 1.49× | 1.85 | 4.85× |
+| **max-autotune-no-cudagraphs** | **7.55** | **1.56×** | **1.47** | **6.12×** |
+
+MAE vs eager ~2e-7. Compile+warmup ~9–52 s (max-autotune longest).
+
+**Compile verdict:** worth it for the Torch shade path. Best mode here is
+``max-autotune-no-cudagraphs``. FXAA still dominates after compile (~6 ms of
+the 7.6 ms stack); shade+IBL alone collapses to ~1.5 ms. Rough full-frame
+estimate: G-buffer ~5.5 + compiled shade+FXAA ~7.6 ≈ **~13 ms** (~1.3× vs
+eager pbr_fast ~17.4), or **~7 ms** if FXAA is off (~1.3× Lambert).
+
+Not productized in `RaycastPBRCamera` yet — wire as an optional
+``compile_shade=True`` / mode knob when integrating.
+
 ### Next iteration candidates
 
-- FXAA opt-in / pretty-only if RL does not need silhouette AA (~2.7 ms @256).
+- Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``).
+- FXAA opt-in / pretty-only if RL does not need silhouette AA (~2.7 ms eager,
+  still ~6 ms inside compiled shade+FXAA).
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
 - Shadow rays as optional pretty mode when light moves every frame (no map rebuild).
