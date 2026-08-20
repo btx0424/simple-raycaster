@@ -175,11 +175,20 @@ class RaycastPBRCamera:
         raycaster: Any,
         *,
         names: Sequence[str] | None = None,
+        albedos: Sequence | torch.Tensor | None = None,
         roughness: Sequence | torch.Tensor | float | None = None,
         metallic: Sequence | torch.Tensor | float | None = None,
     ) -> None:
         self.geom.bind_meshes(raycaster)
         n = self.geom.n_meshes
+        if albedos is not None:
+            alb = torch.as_tensor(albedos, device=self.geom.torch_device, dtype=torch.float32)
+            alb = alb.reshape(-1, 3)
+            if alb.shape[0] != n:
+                raise ValueError(f"albedos length {alb.shape[0]} != n_meshes {n}")
+            self.geom._albedo_t = alb.contiguous()
+            self.geom._albedo_wp = None
+            self.geom.initialized = False
         if names is not None:
             if len(names) != n:
                 raise ValueError(f"names length {len(names)} != n_meshes {n}")

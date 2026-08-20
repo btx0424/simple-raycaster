@@ -152,9 +152,9 @@ def load_scene(
     mesh_names = list(g1.mesh_names or [])
     name_to_id = {model.body(i).name: i for i in range(model.nbody)}
 
-    # Keep soles a few mm above the ground top (z=0) so coplanar hits do not
-    # carve the ankles out of the image.
-    foot_clearance = 0.01
+    # Keep soles clearly above the ground top (z=0). White feet on a white
+    # plane look "sunk" when coplanar even if the BVH hits are correct.
+    foot_clearance = 0.03
     z_min = np.inf
     for i, name in enumerate(mesh_names):
         bid = name_to_id[name]
@@ -180,9 +180,9 @@ def load_scene(
 
     ground = trimesh.creation.box(extents=(10.0, 10.0, 0.05))
     ground.apply_translation((0.0, 0.0, -0.025))
-    # Bottom of the 0.5 m cube sits 1 cm above the ground top (same clearance).
+    # Bottom of the 0.5 m cube sits at the same clearance as the feet.
     cube = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
-    cube.apply_translation((0.45, 0.0, 0.26))
+    cube.apply_translation((0.45, 0.0, 0.25 + foot_clearance))
     static_meshes: list = [ground, cube]
     if cube_first:
         static_meshes = [cube, ground]

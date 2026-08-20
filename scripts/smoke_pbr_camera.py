@@ -408,11 +408,11 @@ def _maybe_g1_preview(
     if len(names) != raycaster.n_meshes:
         names = None
     eye, quats = bench.sample_cameras(
-        1, seed=0, radius_min=1.8, radius_max=1.8, elev_min_deg=22.0, elev_max_deg=22.0
+        1, seed=0, radius_min=2.0, radius_max=2.0, elev_min_deg=12.0, elev_max_deg=12.0
     )
     cam_pos = torch.as_tensor(eye, device=device, dtype=torch.float32)
     # Look at mid-torso once the free joint is raised to standing height.
-    target = np.array([0.0, 0.0, 0.55], dtype=np.float64)
+    target = np.array([0.0, 0.0, 0.65], dtype=np.float64)
     cam_quat = torch.as_tensor(
         np.stack(
             [
@@ -441,6 +441,14 @@ def _maybe_g1_preview(
         shadow_map_extent=2.2,
     )
     pbr.bind_meshes(raycaster, names=names)
+    # Darker ground so white rubber feet read as resting on the plane.
+    if names is not None and raycaster.n_meshes >= 2:
+        alb = pbr.geom._albedo_t
+        assert alb is not None
+        alb = alb.clone()
+        alb[0] = torch.tensor([0.38, 0.38, 0.36], device=device)
+        alb[1] = torch.tensor([0.78, 0.28, 0.16], device=device)
+        pbr.bind_meshes(raycaster, names=names, albedos=alb)
     rgb, depth, mask = pbr.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
     _write_preview(out / "g1_pbr", rgb[0])
     print(
