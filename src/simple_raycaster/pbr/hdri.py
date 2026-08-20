@@ -10,6 +10,13 @@ import torch
 _ASSETS = Path(__file__).resolve().parent / "assets"
 DEFAULT_HDRI = _ASSETS / "poly_haven_studio_1k.hdr"
 
+# Extra bundled maps for A/B (same folder, CC0 Poly Haven 1K).
+BUNDLED_HDRIS: dict[str, Path] = {
+    "studio": DEFAULT_HDRI,
+    "studio_small": _ASSETS / "studio_small_09_1k.hdr",
+    "venice_sunset": _ASSETS / "venice_sunset_1k.hdr",
+}
+
 # Ramamoorthi & Hanrahan cosine-lobe factors for irradiance SH.
 _A0 = np.pi
 _A1 = 2.0 * np.pi / 3.0
@@ -20,6 +27,20 @@ def default_hdri_path() -> Path:
     if not DEFAULT_HDRI.is_file():
         raise FileNotFoundError(f"bundled HDRI missing: {DEFAULT_HDRI}")
     return DEFAULT_HDRI
+
+
+def resolve_hdri_path(name_or_path: str | Path | None = None) -> Path:
+    """Resolve a bundled alias (``studio``, ``studio_small``, ``venice_sunset``) or a file path."""
+    if name_or_path is None:
+        return default_hdri_path()
+    key = str(name_or_path).strip().lower()
+    if key in BUNDLED_HDRIS:
+        path = BUNDLED_HDRIS[key]
+    else:
+        path = Path(name_or_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"HDRI not found: {path} (aliases: {sorted(BUNDLED_HDRIS)})")
+    return path
 
 
 def _rgbe_to_float(rgbe: np.ndarray) -> np.ndarray:
@@ -216,7 +237,7 @@ class EnvironmentHDRI:
 
     @classmethod
     def from_path(cls, path: str | Path | None = None, *, device: str | torch.device = "cuda") -> "EnvironmentHDRI":
-        path = default_hdri_path() if path is None else Path(path)
+        path = resolve_hdri_path(path)
         rgb = load_radiance_hdr(path)
         t = torch.from_numpy(rgb).to(device=device, dtype=torch.float32)
         return cls(t)

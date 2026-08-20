@@ -29,9 +29,11 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
    - ACES tonemap + exposure
    - FXAA on LDR RGB (default on; no extra rays)
    - Misses sample the HDRI along the camera ray
-4. Bundled test HDRI: `pbr/assets/poly_haven_studio_1k.hdr`
-   (Poly Haven, CC0, 1K — enough for SH + IBL).
+4. Bundled test HDRIs (Poly Haven CC0, 1K):
+   `poly_haven_studio_1k.hdr` (default), `studio_small_09_1k.hdr`,
+   `venice_sunset_1k.hdr`. Aliases: ``resolve_hdri_path("studio"|...)``.
 5. Smoke: `scripts/smoke_pbr_camera.py` vs Lambert on the same box.
+   Orbit video: `scripts/orbit_g1_video.py` (depth / Lambert / PBR).
 
 ## Phase 1 — look (still no extra rays)
 

@@ -201,7 +201,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# Local smoke dumps
+# Local smoke / orbit dumps
 scripts/_pbr_smoke/
+scripts/_orbit_g1/
+
 marimo/_lsp/
 __marimo__/
