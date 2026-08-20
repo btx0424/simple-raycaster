@@ -90,6 +90,29 @@ def _write_preview(path: Path, rgb: torch.Tensor) -> None:
     _write_png(stem.with_suffix(".png"), img)
 
 
+def _depth_to_rgb(
+    depth: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    near: float | None = None,
+    far: float | None = None,
+) -> torch.Tensor:
+    """Planar depth → grayscale RGB for side-by-side dumps. Misses are black."""
+    d = depth.detach().float()
+    m = mask.detach().bool()
+    out = torch.zeros(*d.shape, 3, device=d.device, dtype=torch.float32)
+    if not bool(m.any()):
+        return out
+    lo = float(d[m].min()) if near is None else float(near)
+    hi = float(d[m].max()) if far is None else float(far)
+    if hi <= lo + 1e-6:
+        hi = lo + 1.0
+    norm = ((d - lo) / (hi - lo)).clamp(0.0, 1.0)
+    # Near = bright, far = dark (depth-camera style read of proximity).
+    gray = torch.where(m, 1.0 - norm, torch.zeros_like(norm))
+    return gray.unsqueeze(-1).expand_as(out).contiguous()
+
+
 def _look_at_opencv(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
     from scipy.spatial.transform import Rotation
 
@@ -461,31 +484,52 @@ def _maybe_g1_preview(
     )
     mesh_pos, mesh_quat = bench.expand_poses(1, g1_pos, g1_quat, n_static, robot_first=False)
     w, h = _size(width, height, 128, 96)
-    pbr = RaycastPBRCamera(
-        w,
-        h,
+    cam_kw = dict(
+        width=w,
+        height=h,
         fov_y_deg=55.0,
+        near=0.05,
+        far=10.0,
         convention="opencv",
+        depth_mode="planar",
         device=device,
+    )
+    pbr = RaycastPBRCamera(
+        **cam_kw,
         quality="pretty",
         ssao_radius=0.08,
         shadow_map_extent=2.2,
     )
+    lambert = RaycastCamera(**cam_kw)
     alb = None
     if names is not None and raycaster.n_meshes >= 2:
         alb = np.tile(np.array([0.65, 0.65, 0.65], dtype=np.float32), (raycaster.n_meshes, 1))
         alb[0] = (0.38, 0.38, 0.36)  # darker ground — white feet read on top
         alb[1] = (0.78, 0.28, 0.16)
     pbr.bind_meshes(raycaster, names=names, albedos=alb)
-    rgb, depth, mask = pbr.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
-    _write_preview(out / "g1_pbr", rgb[0])
-    print(
-        f"g1 preview {w}x{h} meshes={raycaster.n_meshes} hit_frac={float(mask.float().mean()):.3f} "
-        f"rgb_mean={float(rgb[mask].mean()) if bool(mask.any()) else 0.0:.3f} "
-        f"wrote {out / 'g1_pbr.png'}"
-    )
-    del depth
+    lambert.bind_meshes(raycaster)
+    if alb is not None:
+        lambert._albedo_t = torch.as_tensor(alb, device=lambert.torch_device, dtype=torch.float32)
+        lambert._albedo_wp = None
+    pose_kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
+    rgb_p, depth_p, mask_p = pbr.render(cam_pos, cam_quat, **pose_kw)
+    rgb_l, depth_l, mask_l = lambert.render(cam_pos, cam_quat, **pose_kw)
+    if not torch.equal(mask_p, mask_l):
+        raise SystemExit("g1 preview: PBR/Lambert mask mismatch")
+    ddiff = (depth_p - depth_l).abs().max().item()
+    if ddiff > 1e-4:
+        raise SystemExit(f"g1 preview: PBR/Lambert depth mismatch max={ddiff}")
 
+    _write_preview(out / "g1_pbr", rgb_p[0])
+    _write_preview(out / "g1_lambert", rgb_l[0])
+    _write_preview(out / "g1_depth", _depth_to_rgb(depth_l[0], mask_l[0], near=0.05, far=10.0))
+    print(
+        f"g1 preview {w}x{h} meshes={raycaster.n_meshes} hit_frac={float(mask_p.float().mean()):.3f} "
+        f"pbr_rgb_mean={float(rgb_p[mask_p].mean()) if bool(mask_p.any()) else 0.0:.3f} "
+        f"lambert_rgb_mean={float(rgb_l[mask_l].mean()) if bool(mask_l.any()) else 0.0:.3f} "
+        f"depth_max_abs={ddiff:.2e} "
+        f"wrote {out / 'g1_pbr.png'} {out / 'g1_lambert.png'} {out / 'g1_depth.png'}"
+    )
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
