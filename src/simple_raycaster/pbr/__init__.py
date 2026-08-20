@@ -7,6 +7,7 @@ from .hdri import (
     resolve_hdri_path,
 )
 from .materials import g1_roughness_metallic, materials_for_names
+from .tiled_filters import fxaa_tiled, ssao_tiled
 
 __all__ = [
     "RaycastPBRCamera",
@@ -17,4 +18,6 @@ __all__ = [
     "load_radiance_hdr",
     "g1_roughness_metallic",
     "materials_for_names",
+    "fxaa_tiled",
+    "ssao_tiled",
 ]

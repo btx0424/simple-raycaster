@@ -31,8 +31,9 @@ class RaycastPBRCamera:
     Contact shadows and shadow rays stay opt-in; contact alone is a poor
     shadow proxy (see ``_pbr_camera.md`` probe).
 
-    ``fxaa_impl`` / ``ssao_impl``: ``"tiled"`` (default, Warp shared-memory
-    tiles) or ``"torch"`` (reference PyTorch path).
+    ``fxaa_impl`` / ``ssao_impl``: ``"tiled"`` (Warp shared-memory tiles) or
+    ``"torch"``. Default FXAA is tiled (~1.7× vs Torch @ N=256); default SSAO
+    stays Torch (tiled SSAO is correct but slower at 128×96 / 4 taps).
     """
 
     def __init__(
@@ -61,7 +62,7 @@ class RaycastPBRCamera:
         contact_shadow_length: float = 0.08,
         fxaa_enabled: bool = True,
         fxaa_impl: str = "tiled",
-        ssao_impl: str = "tiled",
+        ssao_impl: str = "torch",
         smooth_normals: bool = True,
         shadow_map_enabled: bool | None = None,
         shadow_map_size: int = 128,

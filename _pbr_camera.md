@@ -218,10 +218,35 @@ rough full-frame with compile: G-buffer ~3.6 + compiled shade+FXAA ~7.6 ≈
 Not productized in `RaycastPBRCamera` yet — wire as an optional
 ``compile_shade=True`` / mode knob when integrating.
 
+### Round 5 — Warp tiled FXAA / SSAO (Warp 1.16, N=256)
+
+Kernels in `pbr/tiled_filters.py` (`wp.launch_tiled` + shared halo tiles).
+Probe: `scripts/bench_tiled_filters.py`.
+
+| filter | torch ms | tiled ms | speedup | mae |
+| --- | ---: | ---: | ---: | ---: |
+| **FXAA** | 2.89 | **1.72** | **1.68×** | ~2e-8 |
+| SSAO (4-tap) | **1.70** | 3.90 | 0.44× | ~1e-10 |
+
+Full frame:
+
+| path | ms/iter |
+| --- | ---: |
+| pbr_fast + torch FXAA | 15.30 |
+| **pbr_fast + tiled FXAA** | **14.17** |
+| pbr_fast no FXAA | 12.51 |
+| pretty torch FXAA+SSAO | **21.61** |
+| pretty tiled FXAA+SSAO | 22.67 |
+
+**Verdict:** default ``fxaa_impl="tiled"``. Keep ``ssao_impl="torch"`` —
+tiled SSAO matches numerically but the TILE×TILE serial loops inside each
+block lose to Torch’s vectorized 4-tap path at this resolution. Use
+``ssao_impl="tiled"`` only to exercise / extend the tile path.
+
 ### Next iteration candidates
 
 - Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``).
+- SIMT Warp SSAO (not tiled) if pretty AO must beat Torch.
 - FXAA opt-in / pretty-only if RL does not need silhouette AA.
-- Warp tile FXAA/SSAO now that the host is on 1.16 (tile API mature).
+- Warp tile-friendly shade only after a Warp shade megakernel.
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
-- Shadow rays as optional pretty mode when light moves every frame (no map rebuild).
