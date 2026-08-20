@@ -50,14 +50,15 @@ def look_at_opencv_wxyz(eye: np.ndarray, target: np.ndarray, world_up: np.ndarra
     if z_norm < 1e-8:
         raise ValueError("eye and target are coincident")
     z_cam = z_cam / z_norm
-    x_cam = np.cross(world_up, z_cam)
+    # right = forward × up (not up × forward — that yields left / Y-up).
+    x_cam = np.cross(z_cam, world_up)
     x_norm = np.linalg.norm(x_cam)
     if x_norm < 1e-6:
         fallback = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        x_cam = np.cross(fallback, z_cam)
+        x_cam = np.cross(z_cam, fallback)
         x_norm = np.linalg.norm(x_cam)
     x_cam = x_cam / x_norm
-    y_cam = np.cross(z_cam, x_cam)
+    y_cam = np.cross(z_cam, x_cam)  # down
     rot = np.stack([x_cam, y_cam, z_cam], axis=1)
     xyzw = Rotation.from_matrix(rot).as_quat()
     return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=np.float32)
@@ -134,6 +135,10 @@ def load_scene(
     xml_path = str(Path(xml_path).resolve())
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
+    # Inspire-hand DFQ parks the free joint at the origin; the stock G1 XML
+    # places the pelvis at z≈0.793 so the feet rest on z=0.
+    if model.nq >= 7 and abs(float(data.qpos[2])) < 1e-6:
+        data.qpos[2] = 0.793
     mujoco.mj_forward(model, data)
 
     body_names = [model.body(i).name for i in range(model.nbody)]

@@ -94,11 +94,13 @@ def _look_at_opencv(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
 
     z_cam = target - eye
     z_cam = z_cam / np.linalg.norm(z_cam)
-    x_cam = np.cross(np.array([0.0, 0.0, 1.0]), z_cam)
+    world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    # OpenCV: +X right, +Y down, +Z forward → right = forward × up.
+    x_cam = np.cross(z_cam, world_up)
     if np.linalg.norm(x_cam) < 1e-6:
-        x_cam = np.cross(np.array([0.0, 1.0, 0.0]), z_cam)
+        x_cam = np.cross(z_cam, np.array([0.0, 1.0, 0.0], dtype=np.float64))
     x_cam = x_cam / np.linalg.norm(x_cam)
-    y_cam = np.cross(z_cam, x_cam)
+    y_cam = np.cross(z_cam, x_cam)  # down
     rot = np.stack([x_cam, y_cam, z_cam], axis=1)
     xyzw = Rotation.from_matrix(rot).as_quat()
     return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=np.float32)
