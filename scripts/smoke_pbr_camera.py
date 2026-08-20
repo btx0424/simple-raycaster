@@ -550,7 +550,7 @@ def main() -> None:
     parser.add_argument(
         "--res",
         type=_parse_res,
-        default=(192, 144),
+        default=None,
         help="WxH for all cameras (default 192x144); overrides --width/--height",
     )
     parser.add_argument("--out", type=str, default="scripts/_pbr_smoke")
