@@ -436,7 +436,7 @@ def _maybe_g1_preview(
         ssao_enabled=True,
         ssao_radius=0.08,
         contact_shadows_enabled=True,
-        shadow_map_enabled=True,
+        shadow_map_enabled=False,
         shadow_map_size=256,
         shadow_map_extent=2.2,
     )
