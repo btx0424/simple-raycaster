@@ -11,6 +11,12 @@ import warp as wp
 
 from simple_raycaster import RaycastCamera, RaycastPBRCamera, default_hdri_path
 from simple_raycaster.pbr.hdri import load_radiance_hdr
+from simple_raycaster.pbr.materials import g1_roughness_metallic, materials_for_names
+
+G1_XML = (
+    "/mnt/workspace/btx0424/aa-projects/object_hoi/src/assets/unitree_g1/"
+    "g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml"
+)
 
 
 def _write_ppm(path: Path, rgb: torch.Tensor) -> None:
@@ -22,20 +28,22 @@ def _write_ppm(path: Path, rgb: torch.Tensor) -> None:
         f.write(np.ascontiguousarray(img).tobytes())
 
 
-def main() -> None:
-    wp.init()
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
-        print("warning: CPU Warp mesh raycast is slow; prefer CUDA")
+def _look_at_opencv(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
+    from scipy.spatial.transform import Rotation
 
-    hdr_path = default_hdri_path()
-    hdri = load_radiance_hdr(hdr_path)
-    print(f"hdri {hdr_path.name} shape={hdri.shape} max={float(hdri.max()):.1f} mean={float(hdri.mean()):.3f}")
-    if hdri.ndim != 3 or hdri.shape[-1] != 3 or hdri.shape[1] < 256:
-        raise SystemExit(f"unexpected HDRI shape {hdri.shape}")
-    if float(hdri.max()) < 2.0:
-        raise SystemExit("HDRI looks clipped (max < 2); need unclipped .hdr not a JPG")
+    z_cam = target - eye
+    z_cam = z_cam / np.linalg.norm(z_cam)
+    x_cam = np.cross(np.array([0.0, 0.0, 1.0]), z_cam)
+    if np.linalg.norm(x_cam) < 1e-6:
+        x_cam = np.cross(np.array([0.0, 1.0, 0.0]), z_cam)
+    x_cam = x_cam / np.linalg.norm(x_cam)
+    y_cam = np.cross(z_cam, x_cam)
+    rot = np.stack([x_cam, y_cam, z_cam], axis=1)
+    xyzw = Rotation.from_matrix(rot).as_quat()
+    return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=np.float32)
 
+
+def _assert_lambert_parity(device: str, out: Path) -> None:
     box = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
     lambert = RaycastCamera(64, 48, fov_y_deg=70.0, convention="opencv", device=device)
     lambert.bind_trimeshes([box], albedos=[(0.9, 0.2, 0.15)])
@@ -47,6 +55,8 @@ def main() -> None:
         device=device,
         default_roughness=0.35,
         default_metallic=0.15,
+        contact_shadows_enabled=False,
+        ssao_enabled=True,
     )
     pbr.bind_trimeshes(
         [box],
@@ -64,8 +74,8 @@ def main() -> None:
     rgb_l, depth_l, mask_l = lambert.render(
         cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat
     )
-    rgb_p, depth_p, mask_p = pbr.render(
-        cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat
+    rgb_p, depth_p, mask_p, gb = pbr.render(
+        cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat, return_gbuffer=True
     )
 
     if rgb_p.shape != rgb_l.shape:
@@ -77,16 +87,274 @@ def main() -> None:
         raise SystemExit(f"depth mismatch vs Lambert max={ddiff}")
     if not bool(mask_p[0, 24, 32]):
         raise SystemExit("expected a hit at the image center")
+    alb = gb["albedo"][0, 24, 32]
+    if (alb - torch.tensor([0.9, 0.2, 0.15], device=device)).abs().max().item() > 1e-4:
+        raise SystemExit(f"constant-albedo lerp failed: {alb.tolist()}")
 
-    out = Path("scripts/_pbr_smoke")
     _write_ppm(out / "lambert.ppm", rgb_l[0])
     _write_ppm(out / "pbr.ppm", rgb_p[0])
     print(
-        f"device={device} hit_frac={float(mask_p.float().mean()):.3f} "
-        f"depth_center={float(depth_p[0, 24, 32]):.3f} depth_max_abs={ddiff:.2e}"
+        f"parity hit_frac={float(mask_p.float().mean()):.3f} "
+        f"depth_center={float(depth_p[0, 24, 32]):.3f} depth_max_abs={ddiff:.2e} "
+        f"lambert_rgb_mean={float(rgb_l[mask_l].mean()):.3f} "
+        f"pbr_rgb_mean={float(rgb_p[mask_p].mean()):.3f}"
     )
-    print(f"lambert_rgb_mean={float(rgb_l[mask_l].mean()):.3f} pbr_rgb_mean={float(rgb_p[mask_p].mean()):.3f}")
-    print(f"wrote {out / 'lambert.ppm'} and {out / 'pbr.ppm'}")
+
+
+def _assert_vertex_colors(device: str, out: Path) -> None:
+    """Three-vertex triangle: red / green / blue — barycentric lerp at center."""
+    verts = np.array(
+        [[-0.6, 0.5, 1.5], [0.6, 0.5, 1.5], [0.0, -0.5, 1.5]],
+        dtype=np.float32,
+    )
+    faces = np.array([[0, 1, 2]], dtype=np.int32)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    mesh.visual.vertex_colors = np.array(
+        [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]],
+        dtype=np.uint8,
+    )
+    pbr = RaycastPBRCamera(
+        64,
+        48,
+        fov_y_deg=70.0,
+        convention="opencv",
+        device=device,
+        ssao_enabled=False,
+        contact_shadows_enabled=False,
+    )
+    pbr.bind_trimeshes([mesh], albedos=[(0.5, 0.5, 0.5)])
+    cam_pos = torch.zeros(1, 3, device=device)
+    cam_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
+    mesh_pos = torch.zeros(1, 1, 3, device=device)
+    mesh_quat = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=device)
+    rgb, depth, mask, gb = pbr.render(
+        cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat, return_gbuffer=True
+    )
+    if float(mask.float().mean()) < 0.2:
+        raise SystemExit(f"vertex-color triangle missed, hit_frac={float(mask.float().mean())}")
+    alb = gb["albedo"][0]
+    # Left of center should be redder than right; bottom bluer than top.
+    left = alb[24, 20]
+    right = alb[24, 44]
+    if not (left[0] > right[0] + 0.05 and right[1] > left[1] + 0.05):
+        raise SystemExit(f"barycentric colors not split L/R: left={left.tolist()} right={right.tolist()}")
+    bottom = alb[36, 32]
+    if float(bottom[2]) < 0.25:
+        raise SystemExit(f"expected blue toward bottom vertex, got {bottom.tolist()}")
+    _write_ppm(out / "vertex_colors.ppm", rgb[0])
+    print(
+        f"vertex_colors hit_frac={float(mask.float().mean()):.3f} "
+        f"left_r={float(left[0]):.2f} right_g={float(right[1]):.2f} bot_b={float(bottom[2]):.2f}"
+    )
+
+
+def _assert_smooth_normals(device: str) -> None:
+    sphere = trimesh.creation.icosphere(subdivisions=2, radius=0.4)
+    kwargs = dict(
+        width=48,
+        height=48,
+        fov_y_deg=50.0,
+        convention="opencv",
+        device=device,
+        ssao_enabled=False,
+        contact_shadows_enabled=False,
+        default_roughness=0.4,
+        default_metallic=0.0,
+    )
+    smooth = RaycastPBRCamera(**kwargs, smooth_normals=True)
+    faceted = RaycastPBRCamera(**kwargs, smooth_normals=False)
+    for cam in (smooth, faceted):
+        cam.bind_trimeshes([sphere], albedos=[(0.7, 0.7, 0.7)])
+    cam_pos = torch.zeros(1, 3, device=device)
+    cam_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device)
+    mesh_pos = torch.tensor([[[0.0, 0.0, 1.4]]], device=device)
+    mesh_quat = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=device)
+    _, _, mask_s, gb_s = smooth.render(
+        cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat, return_gbuffer=True
+    )
+    _, _, mask_f, gb_f = faceted.render(
+        cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat, return_gbuffer=True
+    )
+    if not torch.equal(mask_s, mask_f):
+        raise SystemExit("smooth vs face-normal mask mismatch")
+    n_s = gb_s["normal"][0]
+    n_f = gb_f["normal"][0]
+    m = mask_s[0]
+    # Neighbor normal variation should be smaller with vertex lerp.
+    d_s = (n_s[1:, 1:] - n_s[:-1, :-1]).norm(dim=-1)[m[1:, 1:]]
+    d_f = (n_f[1:, 1:] - n_f[:-1, :-1]).norm(dim=-1)[m[1:, 1:]]
+    if float(d_s.mean()) >= float(d_f.mean()) * 0.95:
+        raise SystemExit(
+            f"smooth normals not smoother: {float(d_s.mean()):.4f} vs face {float(d_f.mean()):.4f}"
+        )
+    print(f"smooth_normals neighbor_d={float(d_s.mean()):.4f} face_d={float(d_f.mean()):.4f}")
+
+
+def _assert_g1_materials() -> None:
+    r_ank, m_ank = g1_roughness_metallic("left_ankle_roll_link")
+    r_hip, m_hip = g1_roughness_metallic("left_hip_pitch_link")
+    r_hand, m_hand = g1_roughness_metallic("L_index_proximal")
+    if not (r_ank > 0.8 and m_ank < 0.05):
+        raise SystemExit(f"ankle should be rubber, got r={r_ank} m={m_ank}")
+    if not (m_hip > 0.3 and r_hip < r_ank):
+        raise SystemExit(f"hip should be painted metal, got r={r_hip} m={m_hip}")
+    if not (m_hand < 0.1 and r_hand > 0.5):
+        raise SystemExit(f"hand should be plastic, got r={r_hand} m={m_hand}")
+    names = ["left_ankle_roll_link", "torso_link", "ground"]
+    r, m = materials_for_names(names)
+    if r[0] <= r[1] or m[1] <= m[0]:
+        raise SystemExit(f"materials_for_names order wrong: r={r} m={m}")
+    print(f"g1_materials ankle=({r_ank:.2f},{m_ank:.2f}) hip=({r_hip:.2f},{m_hip:.2f}) hand=({r_hand:.2f},{m_hand:.2f})")
+
+
+def _assert_contact_and_shadows(device: str, out: Path) -> None:
+    ground = trimesh.creation.box(extents=(4.0, 4.0, 0.04))
+    cube = trimesh.creation.box(extents=(0.4, 0.4, 0.4))
+    eye = np.array([1.15, -1.25, 0.85], dtype=np.float32)
+    quat = _look_at_opencv(eye, np.array([0.2, 0.0, 0.15], dtype=np.float32))
+    cam_pos = torch.tensor(eye, device=device).view(1, 3)
+    cam_quat = torch.tensor(quat, device=device).view(1, 4)
+    mesh_pos = torch.tensor(
+        [[[0.0, 0.0, -0.02], [0.15, 0.0, 0.20]]],
+        device=device,
+    )
+    mesh_quat = torch.tensor([[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]], device=device)
+    sun = (0.85, 0.15, 0.50)
+
+    def _cam(**extra):
+        c = RaycastPBRCamera(
+            96,
+            64,
+            fov_y_deg=55.0,
+            convention="opencv",
+            device=device,
+            ssao_enabled=False,
+            sun_dir=sun,
+            default_roughness=0.5,
+            default_metallic=0.0,
+            **extra,
+        )
+        c.bind_trimeshes(
+            [ground, cube],
+            albedos=[(0.55, 0.55, 0.52), (0.75, 0.25, 0.18)],
+            names=["ground", "cube"],
+        )
+        return c
+
+    off = _cam(contact_shadows_enabled=False, shadow_map_enabled=False, shadow_rays=False)
+    contact = _cam(contact_shadows_enabled=True, shadow_map_enabled=False, shadow_rays=False)
+    smap = _cam(
+        contact_shadows_enabled=False,
+        shadow_map_enabled=True,
+        shadow_map_size=128,
+        shadow_map_extent=2.5,
+        shadow_rays=False,
+    )
+    sray = _cam(contact_shadows_enabled=False, shadow_map_enabled=False, shadow_rays=True)
+
+    kwargs = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
+    _, d0, m0, gb0 = off.render(cam_pos, cam_quat, return_gbuffer=True, **kwargs)
+    rgb_c, _, _, gb_c = contact.render(cam_pos, cam_quat, return_gbuffer=True, **kwargs)
+    rgb_s, _, _, gb_s = smap.render(cam_pos, cam_quat, return_gbuffer=True, **kwargs)
+    rgb_r, _, _, gb_r = sray.render(cam_pos, cam_quat, return_gbuffer=True, **kwargs)
+
+    if not torch.equal(m0, gb_c["mask"]):
+        raise SystemExit("contact-shadow mask drifted")
+    vis_c = gb_c["sun_visibility"]
+    if float((vis_c[m0] < 0.95).float().mean()) < 0.005:
+        raise SystemExit(
+            f"contact shadows never darkened (frac={(vis_c[m0] < 0.95).float().mean().item():.4f})"
+        )
+    vis_s = gb_s["sun_visibility"]
+    vis_r = gb_r["sun_visibility"]
+    if float((vis_s[m0] < 0.5).float().mean()) < 0.01:
+        raise SystemExit("shadow map produced almost no occlusion")
+    if float((vis_r[m0] < 0.5).float().mean()) < 0.01:
+        raise SystemExit("shadow rays produced almost no occlusion")
+
+    _write_ppm(out / "contact.ppm", rgb_c[0])
+    _write_ppm(out / "shadow_map.ppm", rgb_s[0])
+    _write_ppm(out / "shadow_ray.ppm", rgb_r[0])
+    print(
+        f"visibility contact_dark={float((vis_c[m0] < 0.95).float().mean()):.3f} "
+        f"smap_dark={float((vis_s[m0] < 0.5).float().mean()):.3f} "
+        f"sray_dark={float((vis_r[m0] < 0.5).float().mean()):.3f} "
+        f"depth_max={float(d0[m0].max()):.3f}"
+    )
+
+
+def _maybe_g1_preview(device: str, out: Path) -> None:
+    xml = Path(G1_XML)
+    if not xml.is_file():
+        print(f"skip g1 preview (missing {xml})")
+        return
+    import importlib.util
+
+    bench_path = Path(__file__).resolve().parent / "bench_g1_camera.py"
+    spec = importlib.util.spec_from_file_location("bench_g1_camera", bench_path)
+    if spec is None or spec.loader is None:
+        print("skip g1 preview (could not load bench_g1_camera.py)")
+        return
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+
+    raycaster, g1_pos, g1_quat, stats = bench.load_scene(str(xml), device)
+    n_static = int(stats["n_static"])
+    names = ["ground", "cube", *list(stats["g1_names"])]
+    if len(names) != raycaster.n_meshes:
+        names = None
+    eye, quats = bench.sample_cameras(
+        1, seed=0, radius_min=1.6, radius_max=1.6, elev_min_deg=18.0, elev_max_deg=18.0
+    )
+    cam_pos = torch.as_tensor(eye, device=device, dtype=torch.float32)
+    cam_quat = torch.as_tensor(quats, device=device, dtype=torch.float32)
+    mesh_pos, mesh_quat = bench.expand_poses(1, g1_pos, g1_quat, n_static, robot_first=False)
+    pbr = RaycastPBRCamera(
+        128,
+        96,
+        fov_y_deg=55.0,
+        convention="opencv",
+        device=device,
+        ssao_enabled=True,
+        ssao_radius=0.08,
+        contact_shadows_enabled=True,
+        shadow_map_enabled=True,
+        shadow_map_size=256,
+        shadow_map_extent=2.2,
+    )
+    pbr.bind_meshes(raycaster, names=names)
+    rgb, depth, mask = pbr.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
+    _write_ppm(out / "g1_pbr.ppm", rgb[0])
+    print(
+        f"g1 preview meshes={raycaster.n_meshes} hit_frac={float(mask.float().mean()):.3f} "
+        f"rgb_mean={float(rgb[mask].mean()) if bool(mask.any()) else 0.0:.3f} "
+        f"wrote {out / 'g1_pbr.ppm'}"
+    )
+    del depth
+
+
+def main() -> None:
+    wp.init()
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        print("warning: CPU Warp mesh raycast is slow; prefer CUDA")
+
+    hdr_path = default_hdri_path()
+    hdri = load_radiance_hdr(hdr_path)
+    print(f"hdri {hdr_path.name} shape={hdri.shape} max={float(hdri.max()):.1f} mean={float(hdri.mean()):.3f}")
+    if hdri.ndim != 3 or hdri.shape[-1] != 3 or hdri.shape[1] < 256:
+        raise SystemExit(f"unexpected HDRI shape {hdri.shape}")
+    if float(hdri.max()) < 2.0:
+        raise SystemExit("HDRI looks clipped (max < 2); need unclipped .hdr not a JPG")
+
+    out = Path("scripts/_pbr_smoke")
+    _assert_g1_materials()
+    _assert_lambert_parity(device, out)
+    _assert_vertex_colors(device, out)
+    _assert_smooth_normals(device)
+    _assert_contact_and_shadows(device, out)
+    _maybe_g1_preview(device, out)
+    print(f"wrote under {out}")
     print("ok")
 
 

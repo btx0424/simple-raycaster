@@ -14,10 +14,10 @@ PBR / HDRI / SSAO. The existing `RaycastCamera` (Lambert megakernel) is
 Shared geometry: both can `bind_meshes(raycaster)` / `bind_trimeshes(...)`.
 Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
 
-## Phase 0 (this change) — shippable viewer
+## Phase 0 — shippable viewer
 
 1. G-buffer Warp kernel (`pbr/kernels.py`): per pixel `depth`, `mask`,
-   world **face** normal, per-mesh **albedo**, roughness, metallic.
+   world **face** normal (now optional), per-mesh **albedo**, roughness, metallic.
    No RGB in the kernel.
 2. `pbr/hdri.py`: Radiance `.hdr` loader, 3-band SH irradiance, lat-long
    sample, a few roughness mips (downsample).
@@ -32,26 +32,30 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
    (Poly Haven, CC0, 1K — enough for SH + IBL).
 5. Smoke: `scripts/smoke_pbr_camera.py` vs Lambert on the same box.
 
-**Out of Phase 0:** vertex-color lerp, smooth normals, shadow rays,
-shadow maps, contact-shadow march, CUDA graphs on the shade pass.
-
 ## Phase 1 — look (still no extra rays)
 
-- Barycentric vertex colors + vertex normals (`result.face/u/v`).
-- Per-mesh roughness/metallic tables for G1 (metal links vs rubber feet).
-- Optional `return_gbuffer=True` for real2sim (detach hits, optimize
-  albedo/rough/metal + SH).
+- [x] Barycentric vertex colors + vertex normals (`result.face/u/v`).
+      Packed `vert_colors` / `vert_normals` + `vert_offset[M]`.
+      Fallback: constant per-mesh albedo when the trimesh has no authored colors.
+- [x] Per-mesh roughness/metallic tables for G1 (`pbr/materials.py`):
+      rubber ankles/feet, painted-metal links, plastic hands.
+      Applied when `bind_*` is given `names=` (or `raycaster.mesh_names`).
+- [x] `return_gbuffer=True` for real2sim (detach hits, optimize
+      albedo/rough/metal + SH). Hits stay `enable_backward=False`.
 
 ## Phase 2 — cheap local occlusion
 
-- Screen-space **contact shadows** along the sun in the depth image.
-- Tune SSAO radius in metres for G1 (ankles / cube on ground).
+- [x] Screen-space **contact shadows** along the sun in the depth image
+      (`contact_shadows_enabled=True` by default; sun term only).
+- [x] SSAO radius default **0.08 m** (G1 ankles / cube on ground).
+      `0.12` is still fine for a larger room.
 
 ## Phase 3 — optional visibility (pretty mode only)
 
-- Sun **shadow map** (depth-only pass, static meshes, ~256²), not a
-  second full-resolution camera ray.
-- True shadow ray remains a debug knob.
+- [x] Sun **shadow map**: directional ortho, default **256²**, all bound
+      meshes. Off by default (`shadow_map_enabled=False`).
+- [x] True shadow ray toward the sun: debug knob, default **off**
+      (`shadow_rays=False`).
 
 ## Real2sim (later)
 
@@ -63,11 +67,12 @@ materials/SH/exposure yes; poses/mesh assignment no.
 
 ```
 src/simple_raycaster/pbr/
-  __init__.py          # RaycastPBRCamera, default_hdri_path
+  __init__.py          # RaycastPBRCamera, default_hdri_path, G1 materials
   camera.py
-  kernels.py           # raycast_gbuffer_kernel only
+  kernels.py           # g-buffer + ortho shadow map + shadow-ray debug
   hdri.py
-  shade.py
+  shade.py             # PBR, SSAO, contact shadows, shadow-map compare
+  materials.py         # G1 roughness/metallic + vertex pack
   assets/poly_haven_studio_1k.hdr
   assets/README.md
 scripts/smoke_pbr_camera.py

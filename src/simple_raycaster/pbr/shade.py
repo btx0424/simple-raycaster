@@ -43,8 +43,13 @@ def shade_pbr(
     sun_dir_w: torch.Tensor,
     sun_intensity: float = 2.5,
     sun_color: tuple[float, float, float] = (1.0, 0.98, 0.92),
+    sun_visibility: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Linear HDR RGB. ``albedo/normal/view [... 3]``, ``roughness/metallic [...]``."""
+    """Linear HDR RGB. ``albedo/normal/view [... 3]``, ``roughness/metallic [...]``.
+
+    ``sun_visibility`` (optional, ``[...]`` in ``[0,1]``) scales only the sun
+    terms — IBL is unchanged. Contact shadows / shadow maps / shadow rays.
+    """
     n = normal_w / normal_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     v = view_w / view_w.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     l = sun_dir_w / sun_dir_w.norm().clamp_min(1e-8)
@@ -52,6 +57,8 @@ def shade_pbr(
     h = h / h.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
     n_dot_l = (n * l).sum(-1).clamp(0.0, 1.0)
+    if sun_visibility is not None:
+        n_dot_l = n_dot_l * sun_visibility.clamp(0.0, 1.0)
     n_dot_v = (n * v).sum(-1).clamp(1e-4, 1.0)
     n_dot_h = (n * h).sum(-1).clamp(0.0, 1.0)
     v_dot_h = (v * h).sum(-1).clamp(0.0, 1.0)
@@ -94,10 +101,14 @@ def ssao(
     cx: float,
     cy: float,
     n_samples: int = 8,
-    radius: float = 0.12,
+    radius: float = 0.08,
     bias: float = 0.004,
 ) -> torch.Tensor:
-    """Screen-space AO from OpenCV *planar* depth. Returns ``[N,H,W]`` in ``[0,1]``."""
+    """Screen-space AO from OpenCV *planar* depth. Returns ``[N,H,W]`` in ``[0,1]``.
+
+    ``radius`` is metres in world/camera space. ``0.08`` fits G1 ankles and a
+    cube sitting on the ground; ``0.12`` is a looser living-room scale.
+    """
     del cx, cy
     n, h, w = depth.shape
     device = depth.device
@@ -122,3 +133,97 @@ def ssao(
         ao = ao + closer.float() * fade
     ao = (1.0 - ao / float(n_samples)).clamp(0.15, 1.0)
     return torch.where(mask, ao, torch.ones_like(ao))
+
+
+def contact_shadows(
+    depth: torch.Tensor,
+    mask: torch.Tensor,
+    sun_dir_cam: torch.Tensor,
+    *,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    n_steps: int = 8,
+    length: float = 0.08,
+    thickness: float = 0.024,
+    bias: float = 0.002,
+    intensity: float = 0.85,
+) -> torch.Tensor:
+    """March along the projected sun in the depth image (no BVH).
+
+    ``sun_dir_cam`` is the direction *toward* the sun in OpenCV camera space
+    (``+Z`` forward, ``+Y`` down), shape ``[3]`` or ``[N,3]``. ``depth`` is
+    planar camera-Z. Returns sun visibility ``[N,H,W]`` in ``[0,1]``.
+    """
+    n, h, w = depth.shape
+    device = depth.device
+    if sun_dir_cam.ndim == 1:
+        l = sun_dir_cam.reshape(1, 1, 1, 3)
+    else:
+        l = sun_dir_cam.reshape(n, 1, 1, 3)
+    l = l / l.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    ys, xs = torch.meshgrid(
+        torch.arange(h, device=device, dtype=torch.float32) + 0.5,
+        torch.arange(w, device=device, dtype=torch.float32) + 0.5,
+        indexing="ij",
+    )
+    z = depth.clamp_min(1e-4)
+    pos_x = (xs - cx) / fx * z
+    pos_y = (ys - cy) / fy * z
+    pos_z = z
+    bidx = torch.arange(n, device=device)[:, None, None]
+    shadow = torch.zeros(n, h, w, device=device, dtype=depth.dtype)
+    step = float(length) / float(n_steps)
+    for i in range(1, n_steps + 1):
+        t = step * float(i)
+        px = pos_x + l[..., 0] * t
+        py = pos_y + l[..., 1] * t
+        pz = pos_z + l[..., 2] * t
+        sx = fx * px / pz.clamp_min(1e-4) + cx
+        sy = fy * py / pz.clamp_min(1e-4) + cy
+        inb = (sx >= 0.0) & (sx <= float(w - 1)) & (sy >= 0.0) & (sy <= float(h - 1)) & (pz > 1e-4)
+        xi = sx.round().long().clamp(0, w - 1)
+        yi = sy.round().long().clamp(0, h - 1)
+        z_s = depth[bidx, yi, xi]
+        delta = pz - z_s
+        occ = (delta > bias) & (delta < thickness) & inb
+        fade = 1.0 - (float(i) / float(n_steps))
+        shadow = torch.maximum(shadow, occ.float() * fade)
+
+    vis = (1.0 - float(intensity) * shadow).clamp(0.0, 1.0)
+    return torch.where(mask, vis, torch.ones_like(vis))
+
+
+def sample_shadow_map(
+    hit_w: torch.Tensor,
+    mask: torch.Tensor,
+    sm_depth: torch.Tensor,
+    *,
+    center_w: torch.Tensor,
+    right_w: torch.Tensor,
+    up_w: torch.Tensor,
+    forward_w: torch.Tensor,
+    half_extent: float,
+    catch_dist: float,
+    bias: float = 0.012,
+) -> torch.Tensor:
+    """Compare reconstructed hits to an ortho sun depth map. ``sm_depth [N,S,S]``."""
+    n, h, w = mask.shape
+    del h, w
+    size = sm_depth.shape[-1]
+    rel = hit_w - center_w.view(n, 1, 1, 3)
+    u = (rel * right_w.view(1, 1, 1, 3)).sum(-1) / float(half_extent)
+    v = (rel * up_w.view(1, 1, 1, 3)).sum(-1) / float(half_extent)
+    t = (rel * forward_w.view(1, 1, 1, 3)).sum(-1) + float(catch_dist)
+    xi = ((u * 0.5 + 0.5) * float(size)).long()
+    yi = ((v * 0.5 + 0.5) * float(size)).long()
+    inb = (xi >= 0) & (xi < size) & (yi >= 0) & (yi < size)
+    xi = xi.clamp(0, size - 1)
+    yi = yi.clamp(0, size - 1)
+    bidx = torch.arange(n, device=mask.device)[:, None, None]
+    sampled = sm_depth[bidx, yi, xi]
+    vis = (t <= sampled + bias).float()
+    vis = torch.where(inb, vis, torch.ones_like(vis))
+    return torch.where(mask, vis, torch.ones_like(vis))
