@@ -243,6 +243,17 @@ tiled SSAO matches numerically but the TILE×TILE serial loops inside each
 block lose to Torch’s vectorized 4-tap path at this resolution. Use
 ``ssao_impl="tiled"`` only to exercise / extend the tile path.
 
+### Round 6 — Tiled SSGI camera (replaces SSAO)
+
+``RaycastSSGICamera`` subclasses ``RaycastPBRCamera`` and overrides
+``_compose_indirect`` with Warp tiled SSGI (`pbr/ssgi.py`: shared halo,
+4 rays × 8 steps → short-range color bleed + AO-like term). SSAO knobs stay
+on the base camera; SSGI knobs (`ssgi_radius` / `thickness` / `intensity` /
+`bias`) live only on the subclass.
+
+Smoke writes ``g1_ssgi.png`` next to ``g1_pbr.png`` (same pose / meshes /
+shadow map). This is short-range screen-space GI, not full SSR + denoise.
+
 ### Next iteration candidates
 
 - Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``).
@@ -250,3 +261,4 @@ block lose to Torch’s vectorized 4-tap path at this resolution. Use
 - FXAA opt-in / pretty-only if RL does not need silhouette AA.
 - Warp tile-friendly shade only after a Warp shade megakernel.
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
+- Longer SSGI / better normal-aware thickness / denoise if bleed looks noisy.

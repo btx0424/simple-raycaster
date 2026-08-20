@@ -16,7 +16,7 @@ import torch
 import trimesh
 import warp as wp
 
-from simple_raycaster import RaycastCamera, RaycastPBRCamera, default_hdri_path
+from simple_raycaster import RaycastCamera, RaycastPBRCamera, RaycastSSGICamera, default_hdri_path
 from simple_raycaster.pbr.hdri import load_radiance_hdr
 from simple_raycaster.pbr.materials import g1_roughness_metallic, materials_for_names
 from simple_raycaster.pbr.shade import fxaa
@@ -500,6 +500,11 @@ def _maybe_g1_preview(
         ssao_radius=0.08,
         shadow_map_extent=2.2,
     )
+    ssgi = RaycastSSGICamera(
+        **cam_kw,
+        quality="pretty",
+        shadow_map_extent=2.2,
+    )
     lambert = RaycastCamera(**cam_kw)
     # MuJoCo geom rgba (via load_scene mesh_albedos) — do not paint over with gray.
     alb = np.asarray(stats.get("albedos"), dtype=np.float32).reshape(-1, 3)
@@ -508,25 +513,34 @@ def _maybe_g1_preview(
             f"g1 preview albedo count {alb.shape[0]} != n_meshes {raycaster.n_meshes}"
         )
     pbr.bind_meshes(raycaster, names=names, albedos=alb)
+    ssgi.bind_meshes(raycaster, names=names, albedos=alb)
     lambert.bind_meshes(raycaster)
     pose_kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
     rgb_p, depth_p, mask_p = pbr.render(cam_pos, cam_quat, **pose_kw)
+    rgb_s, depth_s, mask_s = ssgi.render(cam_pos, cam_quat, **pose_kw)
     rgb_l, depth_l, mask_l = lambert.render(cam_pos, cam_quat, **pose_kw)
     if not torch.equal(mask_p, mask_l):
         raise SystemExit("g1 preview: PBR/Lambert mask mismatch")
+    if not torch.equal(mask_s, mask_l):
+        raise SystemExit("g1 preview: SSGI/Lambert mask mismatch")
     ddiff = (depth_p - depth_l).abs().max().item()
     if ddiff > 1e-4:
         raise SystemExit(f"g1 preview: PBR/Lambert depth mismatch max={ddiff}")
+    ddiff_s = (depth_s - depth_l).abs().max().item()
+    if ddiff_s > 1e-4:
+        raise SystemExit(f"g1 preview: SSGI/Lambert depth mismatch max={ddiff_s}")
 
     _write_preview(out / "g1_pbr", rgb_p[0])
+    _write_preview(out / "g1_ssgi", rgb_s[0])
     _write_preview(out / "g1_lambert", rgb_l[0])
     _write_preview(out / "g1_depth", _depth_to_rgb(depth_l[0], mask_l[0], near=0.05, far=10.0))
     print(
         f"g1 preview {w}x{h} meshes={raycaster.n_meshes} hit_frac={float(mask_p.float().mean()):.3f} "
         f"pbr_rgb_mean={float(rgb_p[mask_p].mean()) if bool(mask_p.any()) else 0.0:.3f} "
+        f"ssgi_rgb_mean={float(rgb_s[mask_s].mean()) if bool(mask_s.any()) else 0.0:.3f} "
         f"lambert_rgb_mean={float(rgb_l[mask_l].mean()) if bool(mask_l.any()) else 0.0:.3f} "
         f"depth_max_abs={ddiff:.2e} "
-        f"wrote {out / 'g1_pbr.png'} {out / 'g1_lambert.png'} {out / 'g1_depth.png'}"
+        f"wrote {out / 'g1_pbr.png'} {out / 'g1_ssgi.png'} {out / 'g1_lambert.png'} {out / 'g1_depth.png'}"
     )
 
 def main() -> None:

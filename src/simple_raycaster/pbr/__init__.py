@@ -7,10 +7,13 @@ from .hdri import (
     resolve_hdri_path,
 )
 from .materials import g1_roughness_metallic, materials_for_names
+from .ssgi import ssgi_tiled
+from .ssgi_camera import RaycastSSGICamera
 from .tiled_filters import fxaa_tiled, ssao_tiled
 
 __all__ = [
     "RaycastPBRCamera",
+    "RaycastSSGICamera",
     "EnvironmentHDRI",
     "BUNDLED_HDRIS",
     "default_hdri_path",
@@ -20,4 +23,5 @@ __all__ = [
     "materials_for_names",
     "fxaa_tiled",
     "ssao_tiled",
+    "ssgi_tiled",
 ]

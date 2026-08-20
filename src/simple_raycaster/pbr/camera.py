@@ -635,28 +635,16 @@ class RaycastPBRCamera:
         bg = self.env.sample(-gb["view"], roughness=0.0)
         hdr = torch.where(gb["mask"].unsqueeze(-1), hdr, bg)
 
-        if self.ssao_enabled:
-            if self.ssao_impl == "tiled":
-                ao = ssao_tiled(
-                    planar,
-                    gb["mask"],
-                    fx=fx,
-                    fy=fy,
-                    cx=cx,
-                    cy=cy,
-                    radius=self.ssao_radius,
-                )
-            else:
-                ao = ssao(
-                    planar,
-                    gb["mask"],
-                    fx=fx,
-                    fy=fy,
-                    cx=cx,
-                    cy=cy,
-                    radius=self.ssao_radius,
-                )
-            hdr = torch.where(gb["mask"].unsqueeze(-1), hdr * ao.unsqueeze(-1), hdr)
+        hdr = self._compose_indirect(
+            hdr,
+            gb,
+            planar,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            cam_quat_wxyz=cam_quat_wxyz.contiguous(),
+        )
 
         rgb = aces_tonemap(hdr, exposure=self.exposure)
         if self.fxaa_enabled:
@@ -672,3 +660,41 @@ class RaycastPBRCamera:
         if return_hdr:
             return rgb, gb["depth"], gb["mask"], hdr
         return rgb, gb["depth"], gb["mask"]
+
+    def _compose_indirect(
+        self,
+        hdr: torch.Tensor,
+        gb: dict[str, torch.Tensor],
+        planar: torch.Tensor,
+        *,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        cam_quat_wxyz: torch.Tensor,
+    ) -> torch.Tensor:
+        """Optional screen-space occlusion / GI after direct shade. Default: SSAO."""
+        del cam_quat_wxyz
+        if not self.ssao_enabled:
+            return hdr
+        if self.ssao_impl == "tiled":
+            ao = ssao_tiled(
+                planar,
+                gb["mask"],
+                fx=fx,
+                fy=fy,
+                cx=cx,
+                cy=cy,
+                radius=self.ssao_radius,
+            )
+        else:
+            ao = ssao(
+                planar,
+                gb["mask"],
+                fx=fx,
+                fy=fy,
+                cx=cx,
+                cy=cy,
+                radius=self.ssao_radius,
+            )
+        return torch.where(gb["mask"].unsqueeze(-1), hdr * ao.unsqueeze(-1), hdr)

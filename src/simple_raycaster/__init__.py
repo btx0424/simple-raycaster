@@ -6,7 +6,13 @@ from .mesh_rgbd import (
     RaycastMeshRenderer,
     make_mesh_rgbd_renderer,
 )
-from .pbr import EnvironmentHDRI, RaycastPBRCamera, default_hdri_path, resolve_hdri_path
+from .pbr import (
+    EnvironmentHDRI,
+    RaycastPBRCamera,
+    RaycastSSGICamera,
+    default_hdri_path,
+    resolve_hdri_path,
+)
 from .proximity import MeshProximitySensor
 from .raycast_camera import CameraIntrinsics, RaycastCamera
 from .raycaster import MultiMeshRaycaster
@@ -18,6 +24,7 @@ __all__ = [
     "MeshProximitySensor",
     "RaycastCamera",
     "RaycastPBRCamera",
+    "RaycastSSGICamera",
     "EnvironmentHDRI",
     "default_hdri_path",
     "resolve_hdri_path",
