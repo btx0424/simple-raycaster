@@ -257,10 +257,48 @@ shadow map). This is short-range screen-space GI, not full SSR + denoise.
 Quick N=1 @ 128×96 (cached kernels): pretty+SSAO ~3.5 ms, pretty+SSGI ~3.0 ms
 (SSGI is in the same ballpark; tile halo fits the short march well).
 
+### Round 7 — Default res 192×144; torch.compile vs Warp tiled
+
+Script defaults (`bench_*`, `probe_*`, `smoke_pbr_camera`, `orbit_g1_video`)
+are now **192×144**. Probe: `scripts/bench_tiled_filters.py` (N=256, Warp 1.16,
+torch 2.8, `max-autotune-no-cudagraphs`).
+
+Isolated filters:
+
+| filter | torch eager | torch.compile | tiled | best |
+| --- | ---: | ---: | ---: | --- |
+| **FXAA** | 8.71 | **3.13** (2.78×) | 3.92 (2.22×) | compile ≳ tiled |
+| **SSAO** | 5.78 | **0.09** (~60×) | 8.75 (0.66×) | compile ≫ torch; tiled loses |
+
+Full frame (ms/iter):
+
+| path | ms |
+| --- | ---: |
+| pbr_fast + torch FXAA | 43.85 |
+| **pbr_fast + tiled FXAA** | **39.03** |
+| pbr_fast no FXAA | 35.12 |
+| pretty torch FXAA+SSAO | 57.49 |
+| pretty all tiled | 55.59 |
+| **pretty tiled FXAA + torch SSAO** | **52.66** |
+
+Frozen G-buffer shade+FXAA:
+
+| path | ms |
+| --- | ---: |
+| eager torch FXAA | 36.37 |
+| eager tiled FXAA | 31.52 |
+| **compile shade+torch FXAA** | **17.73** (2.05× eager) |
+
+**Verdict @ 192×144:** keep default ``fxaa_impl="tiled"`` for the full camera
+(no compile wiring yet). Prefer ``ssao_impl="torch"`` (tiled SSAO still loses).
+``torch.compile`` on shade+FXAA is the biggest win when the G-buffer is frozen;
+compiled SSAO alone is extremely fast on this shape (output still tracks input).
+Wiring compile into ``RaycastPBRCamera.render`` remains optional / next step.
+
 ### Next iteration candidates
 
-- Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``).
-- SIMT Warp SSAO (not tiled) if pretty AO must beat Torch.
+- Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``) inside the camera.
+- SIMT Warp SSAO (not tiled) if pretty AO must beat Torch eager without compile.
 - FXAA opt-in / pretty-only if RL does not need silhouette AA.
 - Warp tile-friendly shade only after a Warp shade megakernel.
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
