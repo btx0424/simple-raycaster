@@ -31,9 +31,10 @@ class RaycastPBRCamera:
     Contact shadows and shadow rays stay opt-in; contact alone is a poor
     shadow proxy (see ``_pbr_camera.md`` probe).
 
-    ``fxaa_impl`` / ``ssao_impl``: ``"tiled"`` (Warp shared-memory tiles) or
-    ``"torch"``. Default FXAA is tiled (~1.7× vs Torch @ N=256); default SSAO
-    stays Torch (tiled SSAO is correct but slower at 192×144 / 4 taps).
+    Round-7 defaults (@ 192×144, N=256): ``compile_mode="max-autotune-no-cudagraphs"``
+    with Torch FXAA/SSAO (compiled shade+FXAA ~2× vs eager; tiled FXAA loses to
+    compile). Pass ``compile_mode=None`` and ``fxaa_impl="tiled"`` for the
+    no-compile full-frame path (still beats eager Torch FXAA).
     """
 
     def __init__(
@@ -61,8 +62,9 @@ class RaycastPBRCamera:
         contact_shadows_enabled: bool | None = None,
         contact_shadow_length: float = 0.08,
         fxaa_enabled: bool = True,
-        fxaa_impl: str = "tiled",
+        fxaa_impl: str = "torch",
         ssao_impl: str = "torch",
+        compile_mode: str | None = "max-autotune-no-cudagraphs",
         smooth_normals: bool = True,
         shadow_map_enabled: bool | None = None,
         shadow_map_size: int = 128,
@@ -114,6 +116,11 @@ class RaycastPBRCamera:
             raise ValueError(f"ssao_impl must be 'tiled' or 'torch', got {ssao_impl!r}")
         self.fxaa_impl = fxaa_i
         self.ssao_impl = ssao_i
+        if compile_mode is not None:
+            compile_mode = str(compile_mode).strip()
+            if not compile_mode:
+                compile_mode = None
+        self.compile_mode = compile_mode
         self.smooth_normals = bool(smooth_normals)
         self.shadow_map_enabled = bool(shadow_map_enabled)
         self.shadow_map_size = int(shadow_map_size)
@@ -122,6 +129,8 @@ class RaycastPBRCamera:
         self.shadow_rays = bool(shadow_rays)
         self.shadow_ray_tmax = float(shadow_ray_tmax)
         self._work: dict = {}
+        self._compiled_shade_fxaa = None
+        self._compiled_shade_fxaa_key: tuple | None = None
         self._rough_t: torch.Tensor | None = None
         self._metal_t: torch.Tensor | None = None
         self._vert_color_t: torch.Tensor | None = None
@@ -620,6 +629,139 @@ class RaycastPBRCamera:
             assert hit_w is not None
             vis = vis * self._render_shadow_rays(gb, hit_w, sun)
 
+        rgb, hdr = self._shade_tonemap_fxaa(
+            gb,
+            planar,
+            vis,
+            sun,
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            cam_quat_wxyz=cam_quat_wxyz.contiguous(),
+        )
+        gb["sun_visibility"] = vis
+        if return_hdr and return_gbuffer:
+            return rgb, gb["depth"], gb["mask"], hdr, gb
+        if return_gbuffer:
+            return rgb, gb["depth"], gb["mask"], gb
+        if return_hdr:
+            return rgb, gb["depth"], gb["mask"], hdr
+        return rgb, gb["depth"], gb["mask"]
+
+    def _fold_torch_post(self) -> bool:
+        """True when shade+SSAO+tonemap+FXAA can share one ``torch.compile`` graph."""
+        if not self.compile_mode:
+            return False
+        if self.fxaa_enabled and self.fxaa_impl != "torch":
+            return False
+        if self.ssao_enabled and self.ssao_impl != "torch":
+            return False
+        # Subclasses that replace SSAO (e.g. SSGI) keep ``_compose_indirect``.
+        return type(self)._compose_indirect is RaycastPBRCamera._compose_indirect
+
+    def _ensure_compiled_torch_post(self):
+        key = (
+            self.compile_mode,
+            self.ssao_enabled,
+            self.ssao_radius,
+            self.fxaa_enabled,
+            self.exposure,
+            self.sun_intensity,
+        )
+        if self._compiled_shade_fxaa is not None and self._compiled_shade_fxaa_key == key:
+            return self._compiled_shade_fxaa
+
+        env = self.env
+        sun_color = self._sun_color_t
+        exposure = float(self.exposure)
+        sun_intensity = float(self.sun_intensity)
+        do_ssao = bool(self.ssao_enabled)
+        do_fxaa = bool(self.fxaa_enabled)
+        ssao_radius = float(self.ssao_radius)
+
+        def torch_post(
+            albedo: torch.Tensor,
+            normal: torch.Tensor,
+            view: torch.Tensor,
+            roughness: torch.Tensor,
+            metallic: torch.Tensor,
+            mask: torch.Tensor,
+            planar: torch.Tensor,
+            vis: torch.Tensor,
+            sun: torch.Tensor,
+            fx: float,
+            fy: float,
+            cx: float,
+            cy: float,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            hdr = shade_pbr(
+                albedo,
+                normal,
+                view,
+                roughness,
+                metallic,
+                env,
+                sun_dir_w=sun,
+                sun_intensity=sun_intensity,
+                sun_color=sun_color,
+                sun_visibility=vis,
+            )
+            bg = env.sample(-view, roughness=0.0)
+            hdr = torch.where(mask.unsqueeze(-1), hdr, bg)
+            if do_ssao:
+                ao = ssao(
+                    planar,
+                    mask,
+                    fx=fx,
+                    fy=fy,
+                    cx=cx,
+                    cy=cy,
+                    radius=ssao_radius,
+                )
+                hdr = torch.where(mask.unsqueeze(-1), hdr * ao.unsqueeze(-1), hdr)
+            rgb = aces_tonemap(hdr, exposure=exposure)
+            if do_fxaa:
+                rgb = fxaa(rgb)
+            return rgb, hdr
+
+        compiled = torch.compile(torch_post, mode=self.compile_mode)
+        self._compiled_shade_fxaa = compiled
+        self._compiled_shade_fxaa_key = key
+        return compiled
+
+    def _shade_tonemap_fxaa(
+        self,
+        gb: dict[str, torch.Tensor],
+        planar: torch.Tensor,
+        vis: torch.Tensor,
+        sun: torch.Tensor,
+        *,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        cam_quat_wxyz: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Direct shade → optional AO/GI → tonemap → FXAA. Returns ``(rgb, hdr)``."""
+        if self._fold_torch_post():
+            compiled = self._ensure_compiled_torch_post()
+            return compiled(
+                gb["albedo"],
+                gb["normal"],
+                gb["view"],
+                gb["roughness"],
+                gb["metallic"],
+                gb["mask"],
+                planar,
+                vis,
+                sun,
+                fx,
+                fy,
+                cx,
+                cy,
+            )
+
         hdr = shade_pbr(
             gb["albedo"],
             gb["normal"],
@@ -634,7 +776,6 @@ class RaycastPBRCamera:
         )
         bg = self.env.sample(-gb["view"], roughness=0.0)
         hdr = torch.where(gb["mask"].unsqueeze(-1), hdr, bg)
-
         hdr = self._compose_indirect(
             hdr,
             gb,
@@ -643,23 +784,15 @@ class RaycastPBRCamera:
             fy=fy,
             cx=cx,
             cy=cy,
-            cam_quat_wxyz=cam_quat_wxyz.contiguous(),
+            cam_quat_wxyz=cam_quat_wxyz,
         )
-
         rgb = aces_tonemap(hdr, exposure=self.exposure)
         if self.fxaa_enabled:
             if self.fxaa_impl == "tiled":
                 rgb = fxaa_tiled(rgb)
             else:
                 rgb = fxaa(rgb)
-        gb["sun_visibility"] = vis
-        if return_hdr and return_gbuffer:
-            return rgb, gb["depth"], gb["mask"], hdr, gb
-        if return_gbuffer:
-            return rgb, gb["depth"], gb["mask"], gb
-        if return_hdr:
-            return rgb, gb["depth"], gb["mask"], hdr
-        return rgb, gb["depth"], gb["mask"]
+        return rgb, hdr
 
     def _compose_indirect(
         self,

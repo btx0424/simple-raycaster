@@ -159,6 +159,7 @@ def probe_shadows(
             depth_mode="planar",
             device=args.device,
             hdri=env,
+            compile_mode=None,
             **overrides,
         )
         cam.bind_meshes(raycaster, names=names)

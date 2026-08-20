@@ -126,6 +126,7 @@ def main() -> None:
         hdri=env,
         quality="fast",
         fxaa_enabled=True,
+        compile_mode=None,
     )
     cam.bind_meshes(raycaster, names=names)
 

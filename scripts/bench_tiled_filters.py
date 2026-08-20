@@ -114,6 +114,7 @@ def main() -> None:
         quality="fast",
         fxaa_enabled=False,
         fxaa_impl="torch",
+        compile_mode=None,
     )
     cam0.bind_meshes(raycaster, names=names, albedos=albedos)
     rgb0, depth0, mask0 = cam0.render(cam_pos, cam_quat, **kw)
@@ -231,17 +232,46 @@ def main() -> None:
     # --- Full camera paths ---
     print("\n--- full camera ---")
     variants = {
-        "fast_torch_fxaa": dict(quality="fast", fxaa_enabled=True, fxaa_impl="torch"),
-        "fast_tiled_fxaa": dict(quality="fast", fxaa_enabled=True, fxaa_impl="tiled"),
-        "fast_nofxaa": dict(quality="fast", fxaa_enabled=False),
+        "fast_torch_fxaa": dict(
+            quality="fast", fxaa_enabled=True, fxaa_impl="torch", compile_mode=None
+        ),
+        "fast_tiled_fxaa": dict(
+            quality="fast", fxaa_enabled=True, fxaa_impl="tiled", compile_mode=None
+        ),
+        "fast_nofxaa": dict(quality="fast", fxaa_enabled=False, compile_mode=None),
         "pretty_torch": dict(
-            quality="pretty", fxaa_enabled=True, fxaa_impl="torch", ssao_impl="torch"
+            quality="pretty",
+            fxaa_enabled=True,
+            fxaa_impl="torch",
+            ssao_impl="torch",
+            compile_mode=None,
         ),
         "pretty_tiled": dict(
-            quality="pretty", fxaa_enabled=True, fxaa_impl="tiled", ssao_impl="tiled"
+            quality="pretty",
+            fxaa_enabled=True,
+            fxaa_impl="tiled",
+            ssao_impl="tiled",
+            compile_mode=None,
         ),
         "pretty_tiled_fxaa_torch_ssao": dict(
-            quality="pretty", fxaa_enabled=True, fxaa_impl="tiled", ssao_impl="torch"
+            quality="pretty",
+            fxaa_enabled=True,
+            fxaa_impl="tiled",
+            ssao_impl="torch",
+            compile_mode=None,
+        ),
+        "pretty_compile_torch": dict(
+            quality="pretty",
+            fxaa_enabled=True,
+            fxaa_impl="torch",
+            ssao_impl="torch",
+            compile_mode=args.compile_mode,
+        ),
+        "fast_compile_torch": dict(
+            quality="fast",
+            fxaa_enabled=True,
+            fxaa_impl="torch",
+            compile_mode=args.compile_mode,
         ),
     }
     for name, overrides in variants.items():
@@ -271,6 +301,7 @@ def main() -> None:
         hdri=env,
         quality="fast",
         fxaa_enabled=False,
+        compile_mode=None,
     )
     cam_gb.bind_meshes(raycaster, names=names, albedos=albedos)
     gb = cam_gb.render_gbuffer(cam_pos, cam_quat, **kw)
@@ -369,12 +400,14 @@ def main() -> None:
     )
     print(
         f"  pbr_fast: torch_fxaa {results['full']['fast_torch_fxaa']:.2f} → "
-        f"tiled {results['full']['fast_tiled_fxaa']:.2f} ms"
+        f"tiled {results['full']['fast_tiled_fxaa']:.2f} → "
+        f"compile {results['full']['fast_compile_torch']:.2f} ms"
     )
     print(
         f"  pbr_pretty: torch {results['full']['pretty_torch']:.2f} → "
         f"tiled_fxaa+torch_ssao {results['full']['pretty_tiled_fxaa_torch_ssao']:.2f} → "
-        f"all_tiled {results['full']['pretty_tiled']:.2f} ms"
+        f"all_tiled {results['full']['pretty_tiled']:.2f} → "
+        f"compile {results['full']['pretty_compile_torch']:.2f} ms"
     )
     if "compile_torch_fxaa_ms" in results["shade"]:
         print(

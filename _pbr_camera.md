@@ -289,17 +289,17 @@ Frozen G-buffer shade+FXAA:
 | eager tiled FXAA | 31.52 |
 | **compile shade+torch FXAA** | **17.73** (2.05× eager) |
 
-**Verdict @ 192×144:** keep default ``fxaa_impl="tiled"`` for the full camera
-(no compile wiring yet). Prefer ``ssao_impl="torch"`` (tiled SSAO still loses).
-``torch.compile`` on shade+FXAA is the biggest win when the G-buffer is frozen;
-compiled SSAO alone is extremely fast on this shape (output still tracks input).
-Wiring compile into ``RaycastPBRCamera.render`` remains optional / next step.
+**Verdict @ 192×144:** default camera config is now Round-7 best —
+``compile_mode="max-autotune-no-cudagraphs"`` with ``fxaa_impl="torch"`` /
+``ssao_impl="torch"`` (compiled shade+SSAO+FXAA graph). Pass
+``compile_mode=None, fxaa_impl="tiled"`` for the no-compile full-frame path
+(tiled FXAA still beats eager Torch FXAA; tiled SSAO still loses).
 
 ### Next iteration candidates
 
-- Optional ``torch.compile`` on shade (mode ``max-autotune-no-cudagraphs``) inside the camera.
 - SIMT Warp SSAO (not tiled) if pretty AO must beat Torch eager without compile.
 - FXAA opt-in / pretty-only if RL does not need silhouette AA.
 - Warp tile-friendly shade only after a Warp shade megakernel.
 - Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
 - Longer SSGI / better normal-aware thickness / denoise if bleed looks noisy.
+- Compile shade alone for ``RaycastSSGICamera`` (SSGI stays outside the graph).

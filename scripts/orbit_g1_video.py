@@ -205,8 +205,8 @@ def main() -> None:
     if args.res is not None:
         width, height = args.res
     else:
-        width = 256 if args.width is None else int(args.width)
-        height = 192 if args.height is None else int(args.height)
+        width = 192 if args.width is None else int(args.width)
+        height = 144 if args.height is None else int(args.height)
     width, height = _even(width), _even(height)
     if width < 16 or height < 16:
         raise SystemExit(f"resolution {width}x{height} is below 16x16")
@@ -253,6 +253,7 @@ def main() -> None:
     )
     lambert = RaycastCamera(**cam_kw)
     lambert.bind_meshes(raycaster)
+    # Round-7 defaults: compile_mode + torch FXAA/SSAO (camera defaults).
     pbr = RaycastPBRCamera(**cam_kw, hdri=env, quality=args.quality, shadow_map_extent=2.2)
     pbr.bind_meshes(raycaster, names=names, albedos=albedos)
 
@@ -267,7 +268,9 @@ def main() -> None:
 
     print(
         f"orbit {args.frames} frames @ {width}x{height}  fps={args.fps}  "
-        f"hdri={hdri_path.name}  quality={args.quality}  out={out}"
+        f"hdri={hdri_path.name}  quality={args.quality}  "
+        f"fxaa={pbr.fxaa_impl}  ssao={pbr.ssao_impl}  compile={pbr.compile_mode!r}  "
+        f"out={out}"
     )
     pose_kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
     for i in range(args.frames):
