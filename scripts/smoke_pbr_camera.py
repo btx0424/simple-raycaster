@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
+import zlib
 
 import math
 import numpy as np
@@ -20,13 +22,47 @@ G1_XML = (
 )
 
 
-def _write_ppm(path: Path, rgb: torch.Tensor) -> None:
+def _as_u8_rgb(rgb: torch.Tensor) -> np.ndarray:
     img = (rgb.detach().clamp(0.0, 1.0).cpu().numpy() * 255.0).astype(np.uint8)
+    if img.ndim != 3 or img.shape[-1] != 3:
+        raise ValueError(f"expected HxWx3 RGB, got {tuple(img.shape)}")
+    return np.ascontiguousarray(img)
+
+
+def _write_ppm(path: Path, img: np.ndarray) -> None:
+    """Binary Netpbm P6: ASCII header, then packed 8-bit RGB with no padding."""
     h, w = img.shape[:2]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
         f.write(f"P6\n{w} {h}\n255\n".encode("ascii"))
-        f.write(np.ascontiguousarray(img).tobytes())
+        f.write(img.tobytes())
+
+
+def _write_png(path: Path, img: np.ndarray) -> None:
+    """RGB8 PNG via stdlib zlib (no Pillow). Filter 0, non-interlaced."""
+    h, w = img.shape[:2]
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    raw = b"".join(b"\x00" + img[y].tobytes() for y in range(h))
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
+
+
+def _write_preview(path: Path, rgb: torch.Tensor) -> None:
+    """Write ``stem.ppm`` and ``stem.png`` (PPM is the original zero-dep dump)."""
+    img = _as_u8_rgb(rgb)
+    stem = path.with_suffix("")
+    _write_ppm(stem.with_suffix(".ppm"), img)
+    _write_png(stem.with_suffix(".png"), img)
 
 
 def _look_at_opencv(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -92,8 +128,8 @@ def _assert_lambert_parity(device: str, out: Path) -> None:
     if (alb - torch.tensor([0.9, 0.2, 0.15], device=device)).abs().max().item() > 1e-4:
         raise SystemExit(f"constant-albedo lerp failed: {alb.tolist()}")
 
-    _write_ppm(out / "lambert.ppm", rgb_l[0])
-    _write_ppm(out / "pbr.ppm", rgb_p[0])
+    _write_preview(out / "lambert", rgb_l[0])
+    _write_preview(out / "pbr", rgb_p[0])
     print(
         f"parity hit_frac={float(mask_p.float().mean()):.3f} "
         f"depth_center={float(depth_p[0, 24, 32]):.3f} depth_max_abs={ddiff:.2e} "
@@ -154,7 +190,7 @@ def _assert_vertex_colors(device: str, out: Path) -> None:
     # OpenCV +Y is down: v2 (blue) is at negative Y = top of the image.
     if float(top[2]) < float(bot[2]) + 0.2:
         raise SystemExit(f"expected blue at top vertex, top={top.tolist()} bot={bot.tolist()}")
-    _write_ppm(out / "vertex_colors.ppm", rgb[0])
+    _write_preview(out / "vertex_colors", rgb[0])
     print(
         f"vertex_colors hit_frac={float(mask.float().mean()):.3f} "
         f"left_r={float(left[0]):.2f} right_g={float(right[1]):.2f} top_b={float(top[2]):.2f}"
@@ -297,9 +333,9 @@ def _assert_contact_and_shadows(device: str, out: Path) -> None:
     if float((vis_r[m0] < 0.5).float().mean()) < 0.01:
         raise SystemExit("shadow rays produced almost no occlusion")
 
-    _write_ppm(out / "contact.ppm", rgb_c[0])
-    _write_ppm(out / "shadow_map.ppm", rgb_s[0])
-    _write_ppm(out / "shadow_ray.ppm", rgb_r[0])
+    _write_preview(out / "contact", rgb_c[0])
+    _write_preview(out / "shadow_map", rgb_s[0])
+    _write_preview(out / "shadow_ray", rgb_r[0])
     print(
         f"visibility contact_dark={float((vis_c[m0] < 0.95).float().mean()):.3f} "
         f"smap_dark={float((vis_s[m0] < 0.5).float().mean()):.3f} "
@@ -349,11 +385,11 @@ def _maybe_g1_preview(device: str, out: Path) -> None:
     )
     pbr.bind_meshes(raycaster, names=names)
     rgb, depth, mask = pbr.render(cam_pos, cam_quat, mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
-    _write_ppm(out / "g1_pbr.ppm", rgb[0])
+    _write_preview(out / "g1_pbr", rgb[0])
     print(
         f"g1 preview meshes={raycaster.n_meshes} hit_frac={float(mask.float().mean()):.3f} "
         f"rgb_mean={float(rgb[mask].mean()) if bool(mask.any()) else 0.0:.3f} "
-        f"wrote {out / 'g1_pbr.ppm'}"
+        f"wrote {out / 'g1_pbr.png'}"
     )
     del depth
 
