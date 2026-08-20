@@ -96,41 +96,37 @@ _pbr_camera.md         # this file
 ## G1 camera-count bench (RTX 4090)
 
 Scene matches `scripts/bench_g1_camera.py`: ground + cube + G1 Inspire
-(61 meshes, 271k verts, 542k faces), OpenCV 128×96, fov 70°, `far=10`.
-Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
+(61 meshes, standing free-joint, 3 cm foot clearance), OpenCV 128×96,
+fov 70°, `far=10`. Warp 1.6.0, torch 2.8.0+cu128. Depth max|Δ| vs Lambert = 0.
+
+**Headline batch is N=256** (parallel RL). Re-run:
 
 ```
-.venv/bin/python scripts/bench_pbr_camera.py --n 1,8,16,64,256
-.venv/bin/python scripts/bench_pbr_camera.py --shadow-map --shadow-rays
+.venv/bin/python scripts/bench_pbr_camera.py              # N=256 fast
+.venv/bin/python scripts/bench_pbr_camera.py --pretty
+.venv/bin/python scripts/bench_pbr_camera.py --n 64,256,512 --pretty
 ```
 
-| N | lambert | gbuffer | shade | **default** | +smap | +sray |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.47 | 0.45 | 1.94 | **6.06** | 6.02 | 2.60 |
-| 8 | 0.45 | 0.43 | 1.93 | **5.29** | 6.28 | 2.41 |
-| 16 | 0.44 | 0.43 | 1.96 | **5.37** | 6.51 | 2.72 |
-| 64 | 0.93 | 0.94 | 2.57 | **5.88** | 9.19 | 3.74 |
-| 128 | 1.66 | 1.74 | 4.97 | **8.42** | — | — |
-| 256 | 2.72 | 2.82 | 11.88 | **19.61** | 31.42 | 14.75 |
-| 512 | 5.32 | 5.36 | 29.56 | **51.17** | — | — |
-| 1024 | 10.28 | 10.43 | 63.68 | **120.93** | — | — |
+### Round 1 (shade_fast default) — N=256
 
-Times are ms/iter. **default** = GGX + HDRI + SSAO + contact shadows.
-**shade** = GGX + HDRI only. **+smap** is default plus the 256² sun
-shadow map. **+sray** is shade plus a closest-hit sun ray (no SSAO /
-contact, so the extra ray is visible). Peak torch mem for default is
-~367 MB at N=64 and ~4.8 GB at N=1024.
+| path | ms/iter | ms/cam | cam/s | vs Lambert | peak |
+| --- | ---: | ---: | ---: | ---: | --- |
+| lambert | 5.54 | 0.022 | 46.2k | 1.00× | 85 MB |
+| pbr_gbuffer | 5.56 | 0.022 | 46.0k | 1.00× | 232 MB |
+| pbr_nofxaa | 14.65 | 0.057 | 17.5k | 2.65× | 1.07 GB |
+| **pbr_fast** (default) | **17.40** | **0.068** | **14.7k** | **3.14×** | 1.22 GB |
+| pbr_pretty | 23.51 | 0.092 | 10.9k | 4.25× | 1.36 GB |
 
-Takeaways:
+`pbr_fast` = GGX + HDRI + ACES + FXAA. `pbr_pretty` adds 4-tap SSAO + contact.
+Gating SSAO/contact saves **~6 ms** at N=256 (~26% of pretty). FXAA alone is
+~2.7 ms at this batch (nofxaa → fast).
 
-- Closest-hit is not the extra cost. `render_gbuffer` tracks Lambert
-  within a few percent at every N (both ~1.2 Gpix/s once the GPU is full).
-- Small batches (N≤16) sit on a ~0.45 ms trace floor and a ~5–6 ms
-  PyTorch shade/SSAO floor. Default PBR is ~12× Lambert there because
-  SSAO + contact are many small tensor ops, not extra mesh rays.
-- At a typical train batch (N=64, 128×96) default PBR is **5.9 ms**
-  (~6× Lambert 0.93 ms) and still ~11k cameras/s. Drop SSAO/contact
-  (`pbr_shade`) and that falls to **2.6 ms**.
-- Past N=256, SSAO/contact scale worse than GGX (104 Mpix/s vs 198 at
-  N=1024). The 256² shadow map is cheap at N=1 and +12 ms at N=256.
-  A true shadow ray is about one extra closest-hit (~+3 ms at N=256).
+Prior (pre-round-1) “default” with SSAO+contact+8-tap was ~19.6 ms at N=256
+on an earlier sunk-pose scene; do not compare absolute ms across scene
+revisions — use the table above.
+
+### Next iteration candidates
+
+- FXAA opt-in / pretty-only if RL does not need silhouette AA (~2.7 ms @256).
+- Fuse SSAO+contact into one Warp kernel (pretty path only).
+- Workspace / mem for G-buffer at N≥256 (fast peaks ~1.2 GB).
