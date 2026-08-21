@@ -34,6 +34,11 @@ class RaycastPBRCamera:
     the same ``(rgb, depth, mask)`` shapes so it can be A/B'd against Lambert.
     RGB is ACES-tonemapped LDR; linear HDR is available via ``return_hdr=True``.
 
+    ``render`` / ``render_gbuffer`` take a **pose ticket** (camera + mesh poses)
+    and optional per-call material/light tables. Resolution, quality, HDRI, and
+    textures are camera state (:meth:`set_resolution`, constructor,
+    :meth:`set_ground_albedo`) — not ``render`` kwargs.
+
     Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA + **sun shadow rays**
     (second closest-hit cast). Use ``quality="pretty"`` for dumps / viewers
     (SSAO + 128² sun shadow map; no shadow rays — do not stack both).
@@ -424,11 +429,12 @@ class RaycastPBRCamera:
                 default=self.default_metallic,
                 device=device,
             )
+        # Tables feed the G-buffer kernel; shade compile takes G-buffer tensors as
+        # inputs, so table writes must not drop the compiled post graph.
         self._albedo_wp = None
         self._rough_wp = None
         self._metal_wp = None
-        self._compiled_shade_fxaa = None
-        self._compiled_shade_fxaa_key = None
+        self.geom.initialized = False
 
     def set_albedo_textures(
         self,
@@ -580,8 +586,7 @@ class RaycastPBRCamera:
         self.sun_color = tuple(float(x) for x in self._sun_color_t[0].tolist())
         self.sun_intensity = float(self._sun_intensity_t[0].item())
         self.exposure = float(self._exposure_t[0].item())
-        self._compiled_shade_fxaa = None
-        self._compiled_shade_fxaa_key = None
+        # Sun/exposure are compile graph inputs — no need to drop the cache.
 
     def initialize(self) -> None:
         self.geom.initialize()
@@ -737,16 +742,12 @@ class RaycastPBRCamera:
         mesh_quat_w: torch.Tensor | None = None,
         origin_w: torch.Tensor | None = None,
         env_ids: torch.Tensor | None = None,
-        width: int | None = None,
-        height: int | None = None,
-        fov_y_deg: float | None = None,
     ) -> dict[str, torch.Tensor]:
-        if width is not None or height is not None or fov_y_deg is not None:
-            self.set_resolution(
-                width or self.intrinsics.width,
-                height or self.intrinsics.height,
-                fov_y_deg=fov_y_deg,
-            )
+        """Closest-hit G-buffer for a pose ticket.
+
+        Resolution is camera state (:meth:`set_resolution`). Materials come from
+        the current tables (:meth:`set_materials` or ``render(..., albedo=…)``).
+        """
         if (
             not self.geom.initialized
             or self._rough_wp is None
@@ -847,13 +848,31 @@ class RaycastPBRCamera:
         mesh_quat_w: torch.Tensor | None = None,
         origin_w: torch.Tensor | None = None,
         env_ids: torch.Tensor | None = None,
-        width: int | None = None,
-        height: int | None = None,
-        fov_y_deg: float | None = None,
-        light_dir: torch.Tensor | tuple[float, float, float] | None = None,
+        albedo: Sequence | torch.Tensor | None = None,
+        roughness: Sequence | torch.Tensor | float | None = None,
+        metallic: Sequence | torch.Tensor | float | None = None,
+        sun_dir: Sequence | torch.Tensor | None = None,
+        sun_color: Sequence | torch.Tensor | None = None,
+        sun_intensity: Sequence | torch.Tensor | float | None = None,
+        exposure: Sequence | torch.Tensor | float | None = None,
         return_hdr: bool = False,
         return_gbuffer: bool = False,
     ):
+        """Render a pose (+ optional DR) ticket.
+
+        Per-call: camera/mesh poses and optional material/light tables.
+        Not per-call: resolution (:meth:`set_resolution`), quality/HDRI/textures.
+        """
+        if any(x is not None for x in (albedo, roughness, metallic)):
+            self.set_materials(albedo=albedo, roughness=roughness, metallic=metallic)
+        if any(x is not None for x in (sun_dir, sun_color, sun_intensity, exposure)):
+            self.set_lights(
+                sun_dir=sun_dir,
+                sun_color=sun_color,
+                sun_intensity=sun_intensity,
+                exposure=exposure,
+            )
+
         gb = self.render_gbuffer(
             cam_pos_w,
             cam_quat_wxyz,
@@ -861,20 +880,8 @@ class RaycastPBRCamera:
             mesh_quat_w=mesh_quat_w,
             origin_w=origin_w,
             env_ids=env_ids,
-            width=width,
-            height=height,
-            fov_y_deg=fov_y_deg,
         )
-        if light_dir is None:
-            sun = self._sun_dir_t
-        elif isinstance(light_dir, torch.Tensor):
-            sun = light_dir.to(device=self.geom.torch_device, dtype=torch.float32)
-            if sun.ndim == 1:
-                sun = sun.view(1, 3)
-            elif sun.ndim != 2 or sun.shape[-1] != 3:
-                raise ValueError(f"light_dir expected [3] or [N,3], got {tuple(sun.shape)}")
-        else:
-            sun = torch.tensor(light_dir, device=self.geom.torch_device, dtype=torch.float32).view(1, 3)
+        sun = self._sun_dir_t
 
         # Broadcast sun rows to camera batch (Nw==1 or Nw==N).
         n_cam = cam_pos_w.shape[0]
@@ -883,7 +890,7 @@ class RaycastPBRCamera:
         elif sun.shape[0] == n_cam:
             sun_b = sun
         else:
-            raise ValueError(f"light_dir batch {sun.shape[0]} != cameras {n_cam}")
+            raise ValueError(f"sun_dir batch {sun.shape[0]} != cameras {n_cam}")
 
         vis = torch.ones_like(gb["depth"])
         fx, fy, cx, cy = self.intrinsics.resolved_k()

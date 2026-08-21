@@ -121,9 +121,8 @@ rgb, depth, mask = cam.render(cam_pos, cam_quat, mesh_pos_w=..., mesh_quat_w=...
 ## PBR camera (functional / replay-ticket style)
 
 Treat the camera as a **shared renderer**: bind heavy assets once, then each
-frame (or replay sample) is a pure-ish call — poses and optional light override
-as arguments; materials/lights as tables applied immediately before `render`.
-Useful when the replay buffer stores tickets instead of RGB.
+frame (or replay sample) is one `render(...)` with a pose ticket and optional
+DR tables. Resolution / quality / HDRI / textures stay on the camera.
 
 ```python
 import warp as wp
@@ -143,6 +142,7 @@ cam = RaycastPBRCamera(
 )
 cam.bind_meshes(raycaster, names=mesh_names, albedos=base_albedo)
 # optional: cam.set_ground_albedo("forest_ground", tile_m=0.75)
+# rare: cam.set_resolution(256, 192)  # not a render kwarg
 
 # Warm each fixed batch size you will use (env N and replay N) once so
 # torch.compile / workspaces specialize without hitching mid-training.
@@ -158,53 +158,39 @@ for n_warm in (num_envs, train_batch_size):
     )
 
 # --- every step / every replay minibatch (the ticket) ---
-def render_ticket(
+rgb, depth, mask = cam.render(
     cam_pos_w,       # [N, 3]
     cam_quat_wxyz,   # [N, 4] WXYZ
-    mesh_pos_w,      # [N, M, 3]
-    mesh_quat_w,     # [N, M, 4]
-    *,
-    albedo=None,     # [N, M, 3] or [1, M, 3] — optional DR
-    roughness=None,  # [N, M]
-    metallic=None,
-    sun_dir=None,    # [N, 3] or [3]
-    sun_intensity=None,
-    exposure=None,
-):
-    if any(x is not None for x in (albedo, roughness, metallic)):
-        cam.set_materials(albedo=albedo, roughness=roughness, metallic=metallic)
-    if any(x is not None for x in (sun_dir, sun_intensity, exposure)):
-        cam.set_lights(
-            sun_dir=sun_dir, sun_intensity=sun_intensity, exposure=exposure
-        )
-    return cam.render(
-        cam_pos_w,
-        cam_quat_wxyz,
-        mesh_pos_w=mesh_pos_w,
-        mesh_quat_w=mesh_quat_w,
-    )
+    mesh_pos_w=mesh_pos_w,    # [N, M, 3]
+    mesh_quat_w=mesh_quat_w,  # [N, M, 4]
+    albedo=albedo,            # optional [N, M, 3] or [1, M, 3]
+    roughness=roughness,      # optional [N, M]
+    metallic=metallic,
+    sun_dir=sun_dir,          # optional [N, 3] or [3]
+    sun_intensity=sun_intensity,
+    exposure=exposure,
+)
 ```
 
-### What can be passed every `render` call?
+### `render` / `render_gbuffer` arguments vs camera state
 
 | Field | Every call? | Where | Notes |
 | --- | :---: | --- | --- |
-| `cam_pos_w` `[N,3]` | **Yes** | `render(...)` arg | Required. |
-| `cam_quat_wxyz` `[N,4]` | **Yes** | `render(...)` arg | Required (WXYZ). |
-| `mesh_pos_w` `[N,M,3]` | **Yes** | `render(...)` kwarg | Required unless poses come from a bound Isaac entity. |
-| `mesh_quat_w` `[N,M,4]` | **Yes** | `render(...)` kwarg | Same as mesh pos. |
-| `origin_w` / `env_ids` | **Yes** | `render(...)` kwarg | Optional pose helpers. |
-| `light_dir` `[3]` / `[N,3]` | **Yes** | `render(...)` kwarg | One-shot sun **direction** override for that call only; does not update stored `set_lights` tables. Shadow map / sray currently use **row 0**. |
-| `return_hdr` / `return_gbuffer` | **Yes** | `render(...)` kwarg | Output switches only. |
-| `width` / `height` / `fov_y_deg` | Avoid | `render(...)` kwarg | Calls `set_resolution`; changes H×W and retriggers compile specialization. Fix res at construction. |
-| Albedo / roughness / metallic | Between calls | `set_materials(...)` | Not `render` kwargs. Prefer `[N,M,(3)]` tables on the ticket; `Nw==1` broadcasts. Clears the compiled shade cache today — warm again after the last table-shape change, or keep shapes fixed. |
-| Sun color / intensity / exposure | Between calls | `set_lights(...)` | Same pattern as materials. Direction also via `set_lights(sun_dir=...)` if you want it sticky. |
-| Mesh topology / names | **No** | `bind_meshes` / `bind_trimeshes` | Rebind invalidates geometry; bump a “geometry epoch” in tickets if you ever rebind. |
-| HDRI, albedo textures, UVs | **No** | ctor / `set_ground_albedo` / `set_albedo_textures` | Shared assets; not per-sample. |
-| `quality`, sray/smap, FXAA/SSAO, `compile_mode` | **No** | ctor (or rare setters) | Changing these rebuilds / recompiles the post path. Keep identical for collect and replay. |
+| `cam_pos_w` `[N,3]` | **Yes** | `render` arg | Required. |
+| `cam_quat_wxyz` `[N,4]` | **Yes** | `render` arg | Required (WXYZ). |
+| `mesh_pos_w` `[N,M,3]` | **Yes** | `render` kwarg | Required unless poses come from a bound Isaac entity. |
+| `mesh_quat_w` `[N,M,4]` | **Yes** | `render` kwarg | Same as mesh pos. |
+| `origin_w` / `env_ids` | **Yes** | `render` kwarg | Optional pose helpers. |
+| `albedo` / `roughness` / `metallic` | **Yes** (optional) | `render` kwarg | DR tables for this call (`[N,M,(3)]` or `Nw==1` broadcast). Also available via sticky `set_materials`. Does **not** drop the compiled shade graph. |
+| `sun_dir` / `sun_color` / `sun_intensity` / `exposure` | **Yes** (optional) | `render` kwarg | Same; sticky via `set_lights`. Shadow map / sray use **sun row 0**. |
+| `return_hdr` / `return_gbuffer` | **Yes** | `render` kwarg | Output switches only. |
+| Resolution / FOV | **No** | ctor / `set_resolution` | **Removed** from `render` — changing H×W specializes compile. |
+| Mesh topology / names | **No** | `bind_meshes` / `bind_trimeshes` | Rebind invalidates geometry. |
+| HDRI, albedo textures, UVs | **No** | ctor / `set_ground_albedo` / `set_albedo_textures` | Shared assets. |
+| `quality`, sray/smap, FXAA/SSAO, `compile_mode` | **No** | ctor | Keep identical for collect and replay. |
 
-**Ticket minimum:** camera pose + mesh poses (+ material/light table rows or DR seed).  
-**Do not put in the ticket:** meshes, HDRI, textures, compile/quality knobs.
+**Ticket minimum:** camera pose + mesh poses (+ material/light rows or DR seed).  
+**Do not put in the ticket:** meshes, HDRI, textures, resolution, compile/quality knobs.
 
 Use a small fixed set of `N` (e.g. `num_envs` and `train_batch_size`), warm each once, and avoid alternating arbitrary sizes so workspaces and `torch.compile` stay hot.
 

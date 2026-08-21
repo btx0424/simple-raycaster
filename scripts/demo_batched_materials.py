@@ -175,14 +175,6 @@ def main() -> None:
     sun_intensity = torch.tensor([2.5, 2.5, 2.5, 2.5, 3.2, 2.5], device=td)
     exposure = torch.tensor([0.85, 0.85, 0.85, 0.85, 0.85, 1.35], device=td)
 
-    cam.set_materials(albedo=albedo, roughness=rough, metallic=metal)
-    cam.set_lights(
-        sun_dir=sun_dir,
-        sun_color=sun_color,
-        sun_intensity=sun_intensity,
-        exposure=exposure,
-    )
-
     eye = np.array([1.8, -1.6, 1.1], dtype=np.float64)
     target = np.array([0.2, 0.0, 0.3], dtype=np.float64)
     quat = _look_at_opencv(eye, target)
@@ -191,11 +183,19 @@ def main() -> None:
     mesh_pos = torch.zeros(n, 3, 3, device=td, dtype=torch.float32)
     mesh_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=td).view(1, 1, 4).expand(n, 3, 4).contiguous()
 
+    # One render call carries the full ticket (poses + DR tables).
     rgb, depth, mask = cam.render(
         cam_pos,
         cam_quat,
         mesh_pos_w=mesh_pos,
         mesh_quat_w=mesh_quat,
+        albedo=albedo,
+        roughness=rough,
+        metallic=metal,
+        sun_dir=sun_dir,
+        sun_color=sun_color,
+        sun_intensity=sun_intensity,
+        exposure=exposure,
     )
     assert rgb.shape[0] == n
 
