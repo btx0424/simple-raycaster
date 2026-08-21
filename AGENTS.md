@@ -64,6 +64,8 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 * Optional UV albedo: `set_ground_albedo("forest_ground")` (planar XZ UVs +
   Poly Haven diffuse under `pbr/assets/textures/`). Flat table albedo when
   `mesh_tex_id[m] == -1`. Needs ImageMagick `convert`/`identify` to decode JPGs.
+* Functional / replay-ticket usage (what is per-`render` vs camera state):
+  see **readme.md → “PBR camera (functional / replay-ticket style)”**.
 
 ## Which Raycaster to Use
 

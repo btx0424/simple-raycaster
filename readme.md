@@ -118,6 +118,96 @@ cam.bind_meshes(raycaster, names=[...], albedos=...)
 rgb, depth, mask = cam.render(cam_pos, cam_quat, mesh_pos_w=..., mesh_quat_w=...)
 ```
 
+## PBR camera (functional / replay-ticket style)
+
+Treat the camera as a **shared renderer**: bind heavy assets once, then each
+frame (or replay sample) is a pure-ish call — poses and optional light override
+as arguments; materials/lights as tables applied immediately before `render`.
+Useful when the replay buffer stores tickets instead of RGB.
+
+```python
+import warp as wp
+import torch
+from simple_raycaster import MultiMeshRaycaster, RaycastPBRCamera
+
+wp.init()
+device = "cuda:0"
+
+# --- once: geometry + camera config (not part of the ticket) ---
+raycaster = MultiMeshRaycaster(meshes, device=device)
+cam = RaycastPBRCamera(
+    192,
+    144,
+    device=device,
+    quality="fast",  # FXAA + sun shadow rays
+)
+cam.bind_meshes(raycaster, names=mesh_names, albedos=base_albedo)
+# optional: cam.set_ground_albedo("forest_ground", tile_m=0.75)
+
+# Warm each fixed batch size you will use (env N and replay N) once so
+# torch.compile / workspaces specialize without hitching mid-training.
+for n_warm in (num_envs, train_batch_size):
+    _ = cam.render(
+        torch.zeros(n_warm, 3, device=device),
+        torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(n_warm, 4),
+        mesh_pos_w=torch.zeros(n_warm, cam.n_meshes, 3, device=device),
+        mesh_quat_w=torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+        .view(1, 1, 4)
+        .expand(n_warm, cam.n_meshes, 4)
+        .contiguous(),
+    )
+
+# --- every step / every replay minibatch (the ticket) ---
+def render_ticket(
+    cam_pos_w,       # [N, 3]
+    cam_quat_wxyz,   # [N, 4] WXYZ
+    mesh_pos_w,      # [N, M, 3]
+    mesh_quat_w,     # [N, M, 4]
+    *,
+    albedo=None,     # [N, M, 3] or [1, M, 3] — optional DR
+    roughness=None,  # [N, M]
+    metallic=None,
+    sun_dir=None,    # [N, 3] or [3]
+    sun_intensity=None,
+    exposure=None,
+):
+    if any(x is not None for x in (albedo, roughness, metallic)):
+        cam.set_materials(albedo=albedo, roughness=roughness, metallic=metallic)
+    if any(x is not None for x in (sun_dir, sun_intensity, exposure)):
+        cam.set_lights(
+            sun_dir=sun_dir, sun_intensity=sun_intensity, exposure=exposure
+        )
+    return cam.render(
+        cam_pos_w,
+        cam_quat_wxyz,
+        mesh_pos_w=mesh_pos_w,
+        mesh_quat_w=mesh_quat_w,
+    )
+```
+
+### What can be passed every `render` call?
+
+| Field | Every call? | Where | Notes |
+| --- | :---: | --- | --- |
+| `cam_pos_w` `[N,3]` | **Yes** | `render(...)` arg | Required. |
+| `cam_quat_wxyz` `[N,4]` | **Yes** | `render(...)` arg | Required (WXYZ). |
+| `mesh_pos_w` `[N,M,3]` | **Yes** | `render(...)` kwarg | Required unless poses come from a bound Isaac entity. |
+| `mesh_quat_w` `[N,M,4]` | **Yes** | `render(...)` kwarg | Same as mesh pos. |
+| `origin_w` / `env_ids` | **Yes** | `render(...)` kwarg | Optional pose helpers. |
+| `light_dir` `[3]` / `[N,3]` | **Yes** | `render(...)` kwarg | One-shot sun **direction** override for that call only; does not update stored `set_lights` tables. Shadow map / sray currently use **row 0**. |
+| `return_hdr` / `return_gbuffer` | **Yes** | `render(...)` kwarg | Output switches only. |
+| `width` / `height` / `fov_y_deg` | Avoid | `render(...)` kwarg | Calls `set_resolution`; changes H×W and retriggers compile specialization. Fix res at construction. |
+| Albedo / roughness / metallic | Between calls | `set_materials(...)` | Not `render` kwargs. Prefer `[N,M,(3)]` tables on the ticket; `Nw==1` broadcasts. Clears the compiled shade cache today — warm again after the last table-shape change, or keep shapes fixed. |
+| Sun color / intensity / exposure | Between calls | `set_lights(...)` | Same pattern as materials. Direction also via `set_lights(sun_dir=...)` if you want it sticky. |
+| Mesh topology / names | **No** | `bind_meshes` / `bind_trimeshes` | Rebind invalidates geometry; bump a “geometry epoch” in tickets if you ever rebind. |
+| HDRI, albedo textures, UVs | **No** | ctor / `set_ground_albedo` / `set_albedo_textures` | Shared assets; not per-sample. |
+| `quality`, sray/smap, FXAA/SSAO, `compile_mode` | **No** | ctor (or rare setters) | Changing these rebuilds / recompiles the post path. Keep identical for collect and replay. |
+
+**Ticket minimum:** camera pose + mesh poses (+ material/light table rows or DR seed).  
+**Do not put in the ticket:** meshes, HDRI, textures, compile/quality knobs.
+
+Use a small fixed set of `N` (e.g. `num_envs` and `train_batch_size`), warm each once, and avoid alternating arbitrary sizes so workspaces and `torch.compile` stay hot.
+
 ## Isaac Lab integration (`MultiMeshRaycasterV2`)
 
 V2 registers meshes once, then reads live body poses from Isaac entities on each raycast. You do **not** pass `mesh_pos_w` / `mesh_quat_w`.
