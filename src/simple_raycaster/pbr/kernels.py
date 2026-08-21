@@ -1,6 +1,39 @@
 import warp as wp
 
 
+@wp.func
+def sample_albedo_tex(
+    tex: wp.array(dtype=float, ndim=4),
+    tid: int,
+    uv: wp.vec2,
+) -> wp.vec3:
+    """Bilinear sample ``tex[tid]`` with wrap. ``tex`` is ``[T, H, W, 3]`` float RGB."""
+    u = uv[0] - wp.floor(uv[0])
+    v = uv[1] - wp.floor(uv[1])
+    h = float(tex.shape[1])
+    w = float(tex.shape[2])
+    x = u * w - 0.5
+    y = v * h - 0.5
+    x0 = int(wp.floor(x))
+    y0 = int(wp.floor(y))
+    fx = x - float(x0)
+    fy = y - float(y0)
+    # Positive modulo for wrap.
+    wi = int(tex.shape[2])
+    hi = int(tex.shape[1])
+    x0m = (x0 % wi + wi) % wi
+    x1m = ((x0 + 1) % wi + wi) % wi
+    y0m = (y0 % hi + hi) % hi
+    y1m = ((y0 + 1) % hi + hi) % hi
+    c00 = wp.vec3(tex[tid, y0m, x0m, 0], tex[tid, y0m, x0m, 1], tex[tid, y0m, x0m, 2])
+    c10 = wp.vec3(tex[tid, y0m, x1m, 0], tex[tid, y0m, x1m, 1], tex[tid, y0m, x1m, 2])
+    c01 = wp.vec3(tex[tid, y1m, x0m, 0], tex[tid, y1m, x0m, 1], tex[tid, y1m, x0m, 2])
+    c11 = wp.vec3(tex[tid, y1m, x1m, 0], tex[tid, y1m, x1m, 1], tex[tid, y1m, x1m, 2])
+    c0 = c00 * (1.0 - fx) + c10 * fx
+    c1 = c01 * (1.0 - fx) + c11 * fx
+    return c0 * (1.0 - fy) + c1 * fy
+
+
 @wp.kernel(enable_backward=False)
 def raycast_gbuffer_kernel(
     meshes: wp.array(dtype=wp.uint64),
@@ -9,8 +42,11 @@ def raycast_gbuffer_kernel(
     mesh_albedo: wp.array(dtype=wp.vec3, ndim=2),
     mesh_roughness: wp.array(dtype=wp.float32, ndim=2),
     mesh_metallic: wp.array(dtype=wp.float32, ndim=2),
+    mesh_tex_id: wp.array(dtype=wp.int32, ndim=2),
     vert_normals: wp.array(dtype=wp.vec3, ndim=1),
+    vert_uvs: wp.array(dtype=wp.vec2, ndim=1),
     vert_offset: wp.array(dtype=wp.int32, ndim=1),
+    albedo_tex: wp.array(dtype=float, ndim=4),
     cam_pos_w: wp.array(dtype=wp.vec3, ndim=1),
     cam_quat_w: wp.array(dtype=wp.vec4, ndim=1),
     width: int,
@@ -32,7 +68,7 @@ def raycast_gbuffer_kernel(
     metallic_out: wp.array(dtype=wp.float32, ndim=2),
     view_out: wp.array(dtype=wp.vec3, ndim=2),
 ):
-    """Closest-hit G-buffer. Albedo/rough/metal from per-(world, mesh) tables."""
+    """Closest-hit G-buffer. Flat table albedo, or UV×texture when ``mesh_tex_id>=0``."""
     n, pix = wp.tid()
     n_meshes = mesh_pos_w.shape[1]
     px = pix % width
@@ -57,6 +93,7 @@ def raycast_gbuffer_kernel(
     wi_a = n % mesh_albedo.shape[0]
     wi_r = n % mesh_roughness.shape[0]
     wi_m = n % mesh_metallic.shape[0]
+    wi_t = n % mesh_tex_id.shape[0]
 
     best_t = float(far)
     best_n = wp.vec3(0.0, 0.0, 0.0)
@@ -98,7 +135,17 @@ def raycast_gbuffer_kernel(
                     best_n = wp.quat_rotate(mq_xyzw, result.normal)
             else:
                 best_n = wp.quat_rotate(mq_xyzw, result.normal)
-            best_albedo = mesh_albedo[wi_a, m]
+            tint = mesh_albedo[wi_a, m]
+            tid = mesh_tex_id[wi_t, m]
+            if tid >= 0:
+                uv = (
+                    vert_uvs[base + i0] * w0
+                    + vert_uvs[base + i1] * w1
+                    + vert_uvs[base + i2] * w2
+                )
+                best_albedo = wp.cw_mul(sample_albedo_tex(albedo_tex, tid, uv), tint)
+            else:
+                best_albedo = tint
             best_r = mesh_roughness[wi_r, m]
             best_met = mesh_metallic[wi_m, m]
             hit = wp.bool(True)

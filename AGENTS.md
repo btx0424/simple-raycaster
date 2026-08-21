@@ -59,6 +59,9 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 * No-compile path: `compile_mode=None, fxaa_impl="tiled"` (tiled SSAO still loses).
 * `RaycastSSGICamera` overrides `_compose_indirect`; SSGI knobs stay on the subclass.
 * Script default resolution is **192×144**. Headline RL batch is **N=256**.
+* Optional UV albedo: `set_ground_albedo("forest_ground")` (planar XZ UVs +
+  Poly Haven diffuse under `pbr/assets/textures/`). Flat table albedo when
+  `mesh_tex_id[m] == -1`. Needs ImageMagick `convert`/`identify` to decode JPGs.
 
 ## Which Raycaster to Use
 

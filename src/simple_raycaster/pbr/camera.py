@@ -20,6 +20,10 @@ from .materials import (
     pack_vertex_normals_from_wp,
 )
 from .shade import aces_tonemap, contact_shadows, fxaa, sample_shadow_map, shade_pbr, ssao
+from .textures import (
+    load_albedo_texture,
+    pack_vertex_uvs_from_wp,
+)
 from .tiled_filters import fxaa_tiled, ssao_tiled
 
 
@@ -44,6 +48,10 @@ class RaycastPBRCamera:
     :meth:`set_materials` / :meth:`set_lights` (``[Nw, M, …]`` with ``Nw==1``
     broadcast). G-buffer albedo/rough/metal come from those tables, not baked
     vertex colors, so DR is a tensor write without rebinding meshes.
+
+    Optional UV albedo: :meth:`set_ground_albedo` (or :meth:`set_albedo_textures`
+    + planar UVs) samples a diffuse map when ``mesh_tex_id[m] >= 0``, multiplied
+    by the table albedo tint.
     """
 
     def __init__(
@@ -145,11 +153,17 @@ class RaycastPBRCamera:
         self._metal_t: torch.Tensor | None = None  # [Nw, M]
         self._vert_normal_t: torch.Tensor | None = None
         self._vert_offset_t: torch.Tensor | None = None
+        self._vert_uv_t: torch.Tensor | None = None  # [V, 2]
+        self._mesh_tex_id_t: torch.Tensor | None = None  # [Nw, M] int32; -1 = flat
+        self._albedo_tex_t: torch.Tensor | None = None  # [T, H, W, 3]
         self._albedo_wp = None
         self._rough_wp = None
         self._metal_wp = None
         self._vert_normal_wp = None
         self._vert_offset_wp = None
+        self._vert_uv_wp = None
+        self._mesh_tex_id_wp = None
+        self._albedo_tex_wp = None
         self._mesh_names: list[str] = []
         self._last_mesh_pos: torch.Tensor | None = None
         self._last_mesh_quat: torch.Tensor | None = None
@@ -299,8 +313,19 @@ class RaycastPBRCamera:
         device = self.geom.torch_device
         self._vert_normal_t = torch.as_tensor(normals, device=device, dtype=torch.float32)
         self._vert_offset_t = torch.as_tensor(offsets, device=device, dtype=torch.int32)
+        # Flat albedo until set_ground_albedo / set_albedo_textures.
+        n_verts = int(normals.shape[0])
+        n_meshes = int(offsets.shape[0])
+        self._vert_uv_t = torch.zeros(n_verts, 2, device=device, dtype=torch.float32)
+        self._mesh_tex_id_t = torch.full(
+            (1, n_meshes), -1, device=device, dtype=torch.int32
+        )
+        self._albedo_tex_t = torch.ones(1, 1, 1, 3, device=device, dtype=torch.float32)
         self._vert_normal_wp = None
         self._vert_offset_wp = None
+        self._vert_uv_wp = None
+        self._mesh_tex_id_wp = None
+        self._albedo_tex_wp = None
         self.geom.initialized = False
 
     @staticmethod
@@ -399,6 +424,115 @@ class RaycastPBRCamera:
         self._compiled_shade_fxaa = None
         self._compiled_shade_fxaa_key = None
 
+    def set_albedo_textures(
+        self,
+        textures: Sequence | torch.Tensor | np.ndarray,
+        *,
+        mesh_tex_id: Sequence | torch.Tensor | None = None,
+    ) -> None:
+        """Bind albedo texture stack ``[T,H,W,3]`` and optional per-mesh tex ids.
+
+        ``mesh_tex_id`` is ``[M]`` or ``[Nw,M]``; ``-1`` keeps flat table albedo.
+        Sampled RGB is multiplied by the mesh albedo tint.
+        """
+        n = int(self.geom.n_meshes)
+        if n <= 0:
+            raise RuntimeError("bind meshes before set_albedo_textures")
+        device = self.geom.torch_device
+        tex = torch.as_tensor(textures, device=device, dtype=torch.float32)
+        if tex.ndim == 3:
+            tex = tex.unsqueeze(0)
+        if tex.ndim != 4 or tex.shape[-1] != 3:
+            raise ValueError(f"textures shape {tuple(tex.shape)}, expected [T,H,W,3]")
+        self._albedo_tex_t = tex.contiguous().clamp(0.0, 1.0)
+        if mesh_tex_id is not None:
+            ids = torch.as_tensor(mesh_tex_id, device=device, dtype=torch.int32)
+            if ids.ndim == 1:
+                if ids.numel() != n:
+                    raise ValueError(f"mesh_tex_id length {ids.numel()} != n_meshes {n}")
+                ids = ids.view(1, n)
+            elif ids.ndim == 2:
+                if ids.shape[-1] != n:
+                    raise ValueError(f"mesh_tex_id shape {tuple(ids.shape)} last != {n}")
+            else:
+                raise ValueError(f"mesh_tex_id expected [M] or [Nw,M], got {tuple(ids.shape)}")
+            self._mesh_tex_id_t = ids.contiguous()
+        self._albedo_tex_wp = None
+        self._mesh_tex_id_wp = None
+        self.geom.initialized = False
+
+    def set_vertex_uvs(self, uvs: Sequence | torch.Tensor | np.ndarray) -> None:
+        """Replace packed vertex UVs ``[V, 2]`` (must match packed normal count)."""
+        if self._vert_normal_t is None:
+            raise RuntimeError("bind meshes before set_vertex_uvs")
+        device = self.geom.torch_device
+        t = torch.as_tensor(uvs, device=device, dtype=torch.float32)
+        if t.ndim != 2 or t.shape[-1] != 2:
+            raise ValueError(f"uvs shape {tuple(t.shape)}, expected [V,2]")
+        if t.shape[0] != self._vert_normal_t.shape[0]:
+            raise ValueError(
+                f"uvs V={t.shape[0]} != packed verts {self._vert_normal_t.shape[0]}"
+            )
+        self._vert_uv_t = t.contiguous()
+        self._vert_uv_wp = None
+        self.geom.initialized = False
+
+    def set_ground_albedo(
+        self,
+        name_or_path: str | Path = "forest_ground",
+        *,
+        mesh_name: str = "ground",
+        mesh_index: int | None = None,
+        tile_m: float = 1.0,
+        tint: Sequence | torch.Tensor | None = None,
+    ) -> None:
+        """Minimal ground path: planar XZ UVs + one diffuse albedo on a named mesh.
+
+        Looks up ``mesh_name`` in bound names (or uses ``mesh_index``). Table albedo
+        for that mesh becomes ``tint`` (default white) so the texture shows through.
+        """
+        n = int(self.geom.n_meshes)
+        if n <= 0:
+            raise RuntimeError("bind meshes before set_ground_albedo")
+        if mesh_index is None:
+            key = str(mesh_name).lower()
+            hits = [i for i, nm in enumerate(self._mesh_names) if key in str(nm).lower()]
+            if not hits:
+                raise ValueError(
+                    f"no mesh matching name {mesh_name!r} in {self._mesh_names!r}; "
+                    "pass mesh_index=…"
+                )
+            mesh_index = int(hits[0])
+        mi = int(mesh_index)
+        if mi < 0 or mi >= n:
+            raise ValueError(f"mesh_index {mi} out of range [0, {n})")
+
+        device = self.geom.torch_device
+        ids = torch.full((n,), -1, device=device, dtype=torch.int32)
+        ids[mi] = 0
+        tex = load_albedo_texture(name_or_path)
+        self.set_albedo_textures(tex[None, ...], mesh_tex_id=ids)
+
+        if not self.geom.meshes_wp:
+            raise RuntimeError("set_ground_albedo requires Warp meshes after bind")
+        uvs = pack_vertex_uvs_from_wp(
+            self.geom.meshes_wp,
+            textured_mesh_ids=[mi],
+            scale=float(tile_m),
+        )
+        self.set_vertex_uvs(uvs)
+
+        if self._albedo_t is None:
+            alb = torch.ones(1, n, 3, device=device, dtype=torch.float32)
+        else:
+            alb = self._albedo_t.clone()
+        if tint is None:
+            alb[:, mi] = 1.0
+        else:
+            t = torch.as_tensor(tint, device=device, dtype=torch.float32).reshape(3)
+            alb[:, mi] = t
+        self.set_materials(albedo=alb)
+
     def set_lights(
         self,
         *,
@@ -447,12 +581,17 @@ class RaycastPBRCamera:
         self.geom.initialize()
         assert self._albedo_t is not None and self._rough_t is not None and self._metal_t is not None
         assert self._vert_normal_t is not None and self._vert_offset_t is not None
+        assert self._vert_uv_t is not None and self._mesh_tex_id_t is not None
+        assert self._albedo_tex_t is not None
         alb = self._albedo_t.contiguous()
         self._albedo_wp = wp.from_torch(alb, dtype=wp.vec3)
         self._rough_wp = wp.from_torch(self._rough_t.contiguous(), dtype=wp.float32)
         self._metal_wp = wp.from_torch(self._metal_t.contiguous(), dtype=wp.float32)
         self._vert_normal_wp = wp.from_torch(self._vert_normal_t, dtype=wp.vec3)
         self._vert_offset_wp = wp.from_torch(self._vert_offset_t, dtype=wp.int32)
+        self._vert_uv_wp = wp.from_torch(self._vert_uv_t.contiguous(), dtype=wp.vec2)
+        self._mesh_tex_id_wp = wp.from_torch(self._mesh_tex_id_t.contiguous(), dtype=wp.int32)
+        self._albedo_tex_wp = wp.from_torch(self._albedo_tex_t.contiguous(), dtype=wp.float32)
 
     def _cached(self, key: str, shape: tuple, dtype: torch.dtype) -> torch.Tensor:
         return workspace_tensor(self._work, key, shape, dtype, self.geom.torch_device)
@@ -607,6 +746,9 @@ class RaycastPBRCamera:
             or self._rough_wp is None
             or self._albedo_wp is None
             or self._vert_normal_wp is None
+            or self._vert_uv_wp is None
+            or self._mesh_tex_id_wp is None
+            or self._albedo_tex_wp is None
         ):
             self.initialize()
 
@@ -647,8 +789,11 @@ class RaycastPBRCamera:
                 self._albedo_wp,
                 self._rough_wp,
                 self._metal_wp,
+                self._mesh_tex_id_wp,
                 self._vert_normal_wp,
+                self._vert_uv_wp,
                 self._vert_offset_wp,
+                self._albedo_tex_wp,
                 wp.from_torch(cam_pos_w.contiguous(), dtype=wp.vec3, return_ctype=True),
                 wp.from_torch(cam_quat_wxyz.contiguous(), dtype=wp.vec4, return_ctype=True),
                 w,
