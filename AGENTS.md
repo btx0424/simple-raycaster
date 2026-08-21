@@ -52,8 +52,10 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 
 ### PBR camera (`pbr/`)
 
-* `quality="fast"` — GGX + HDRI + ACES + FXAA (no SSAO / shadows).
-* `quality="pretty"` — adds SSAO + 128² sun shadow map (viewers / dumps).
+* `quality="fast"` — GGX + HDRI + ACES + FXAA + **sun shadow rays**
+  (second closest-hit cast; no SSAO / shadow map).
+* `quality="pretty"` — SSAO + 128² sun shadow map (viewers / dumps; no sray).
+  Do not stack sray + smap; if both are enabled, sray wins.
 * Defaults (Round 7 @ 192×144): `compile_mode="max-autotune-no-cudagraphs"`,
   `fxaa_impl="torch"`, `ssao_impl="torch"` (compiled shade+SSAO+FXAA graph).
 * No-compile path: `compile_mode=None, fxaa_impl="tiled"` (tiled SSAO still loses).

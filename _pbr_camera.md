@@ -59,19 +59,21 @@ Hits should match Lambert depth at `atol=1e-4` (same BVH, same tmax shrink).
 
 - [x] Sun **shadow map**: directional ortho, default **128²** (was 256).
       On in ``quality="pretty"``; off in ``fast``.
-- [x] True shadow ray toward the sun: debug / GT knob
-      (`shadow_rays=False` by default).
+- [x] True shadow ray toward the sun (second closest-hit cast).
+      **On by default in ``quality="fast"``** (RL); off in ``pretty`` so we
+      do not stack with the shadow map. If both flags are set, sray wins.
 
 ## Quality presets
 
-| `quality` | SSAO | shadow map | contact | FXAA | Use |
-| --- | --- | --- | --- | --- | --- |
-| `"fast"` (default) | off | off | off | on | parallel RL / train RGB |
-| `"pretty"` | on (4-tap) | **128²** | off | on | dumps / viewer |
+| `quality` | SSAO | shadow map | shadow rays | contact | FXAA | Use |
+| --- | --- | --- | --- | --- | --- | --- |
+| `"fast"` (default) | off | off | **on** | off | on | parallel RL / train RGB |
+| `"pretty"` | on (4-tap) | **128²** | off | off | on | dumps / viewer |
 
-Explicit `ssao_enabled=` / `shadow_map_enabled=` / `contact_shadows_enabled=`
-still override the preset. Prefer **shadow rays** over stacking contact+map
-when you need GT-quality visibility at similar cost (see Round 2).
+Explicit `ssao_enabled=` / `shadow_map_enabled=` / `shadow_rays=` /
+`contact_shadows_enabled=` still override the preset. Prefer **shadow rays**
+for hard sun visibility; keep the map for pretty/soft-looking dumps. Do not
+stack sray + smap (sray wins if both are on).
 
 ## Real2sim (later)
 
@@ -171,9 +173,10 @@ Probe: `scripts/probe_pbr_opt.py`. Shadow-ray visibility is the reference.
 | **sray** | **+4.9** | **1.00** | **1.00** |
 | contact+smap256 | +19.4 | 0.27 | 0.60 |
 
-**Shadows verdict:** use **128² shadow map** for pretty / viewer (default now),
-or **shadow rays** when you want GT visibility at similar cost to smap128 at
-this res/N. Skip contact-as-shadow; do not stack contact+map.
+**Shadows verdict:** ``quality="fast"`` uses **shadow rays** (GT visibility,
+~+3 ms @ N=256 on Warp 1.16). ``quality="pretty"`` keeps **128² shadow map**
+for viewers. Do not stack; if both flags are on, sray wins. Skip
+contact-as-shadow.
 
 **Graphs verdict** (after fixing host `torch.tensor` inside `shade_pbr`):
 

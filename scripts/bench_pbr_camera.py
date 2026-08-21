@@ -80,7 +80,6 @@ def _make_pbr(args, device: str, env: EnvironmentHDRI, **overrides) -> RaycastPB
         device=device,
         hdri=env,
         quality="fast",
-        shadow_rays=False,
     )
     kw.update(overrides)
     return RaycastPBRCamera(**kw)
@@ -124,7 +123,11 @@ def main() -> None:
         action="store_true",
         help="Also time pretty with shadow_map_size=256 (pretty already uses 128²)",
     )
-    parser.add_argument("--shadow-rays", action="store_true", help="Also time closest-hit sun shadow rays")
+    parser.add_argument(
+        "--no-shadow-rays",
+        action="store_true",
+        help="Also time fast with shadow_rays=False (default fast now includes sray)",
+    )
     parser.add_argument("--json-out", type=str, default="")
     args = parser.parse_args()
 
@@ -161,7 +164,9 @@ def main() -> None:
     lambert.bind_meshes(raycaster)
     pbr_fast = _make_pbr(args, device, env, quality="fast")
     pbr_fast.bind_meshes(raycaster, names=names)
-    pbr_gbuf = _make_pbr(args, device, env, quality="fast", fxaa_enabled=False)
+    pbr_gbuf = _make_pbr(
+        args, device, env, quality="fast", fxaa_enabled=False, shadow_rays=False
+    )
     pbr_gbuf.bind_meshes(raycaster, names=names)
     pbr_nofxaa = _make_pbr(args, device, env, quality="fast", fxaa_enabled=False)
     pbr_nofxaa.bind_meshes(raycaster, names=names)
@@ -170,17 +175,17 @@ def main() -> None:
         pbr_pretty = _make_pbr(args, device, env, quality="pretty")
         pbr_pretty.bind_meshes(raycaster, names=names)
     pbr_smap = None
-    pbr_sray = None
+    pbr_nosray = None
     if args.shadow_map:
         pbr_smap = _make_pbr(
             args, device, env, quality="pretty", shadow_map_enabled=True, shadow_map_size=256
         )
         pbr_smap.bind_meshes(raycaster, names=names)
-    if args.shadow_rays:
-        pbr_sray = _make_pbr(
-            args, device, env, quality="fast", fxaa_enabled=False, shadow_rays=True
+    if args.no_shadow_rays:
+        pbr_nosray = _make_pbr(
+            args, device, env, quality="fast", fxaa_enabled=False, shadow_rays=False
         )
-        pbr_sray.bind_meshes(raycaster, names=names)
+        pbr_nosray.bind_meshes(raycaster, names=names)
 
     n0 = min(args.n)
     mesh_pos0, mesh_quat0 = expand_poses(n0, g1_pos, g1_quat, n_static)
@@ -207,7 +212,7 @@ def main() -> None:
     if depth_err > 1e-4:
         print(f"  WARNING: Lambert vs PBR depth max|Δ|={depth_err:.3e} > 1e-4")
     del rgb_l, depth_l, mask_l, rgb_p, depth_p, mask_p, mesh_pos0, mesh_quat0, cam_pos0, cam_quat0
-    for cam in (lambert, pbr_fast, pbr_nofxaa, pbr_gbuf, pbr_pretty, pbr_smap, pbr_sray):
+    for cam in (lambert, pbr_fast, pbr_nofxaa, pbr_gbuf, pbr_pretty, pbr_smap, pbr_nosray):
         if cam is not None:
             _clear_work(cam)
     torch.cuda.empty_cache()
@@ -263,8 +268,10 @@ def main() -> None:
             )
         if pbr_smap is not None:
             time_path(n, "pbr_smap", pbr_smap, lambda: pbr_smap.render(cam_pos, cam_quat, **kw))
-        if pbr_sray is not None:
-            time_path(n, "pbr_sray", pbr_sray, lambda: pbr_sray.render(cam_pos, cam_quat, **kw))
+        if pbr_nosray is not None:
+            time_path(
+                n, "pbr_nosray", pbr_nosray, lambda: pbr_nosray.render(cam_pos, cam_quat, **kw)
+            )
 
         del mesh_pos, mesh_quat, cam_pos, cam_quat
         torch.cuda.empty_cache()

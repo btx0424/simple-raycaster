@@ -189,7 +189,7 @@ def main() -> None:
         "--quality",
         choices=("fast", "pretty"),
         default="pretty",
-        help="PBR quality preset (pretty = SSAO + 128² shadow map)",
+        help="PBR quality preset (fast = FXAA + sun shadow rays; pretty = SSAO + 128² shadow map)",
     )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--out", type=str, default="scripts/_orbit_g1")

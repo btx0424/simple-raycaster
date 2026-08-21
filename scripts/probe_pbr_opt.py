@@ -107,12 +107,13 @@ def probe_shadows(
     kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
 
     variants = {
-        "none": dict(quality="fast", fxaa_enabled=False),
+        "none": dict(quality="fast", fxaa_enabled=False, shadow_rays=False),
         "contact": dict(
             quality="fast",
             fxaa_enabled=False,
             contact_shadows_enabled=True,
             ssao_enabled=False,
+            shadow_rays=False,
         ),
         "smap128": dict(
             quality="fast",
@@ -121,6 +122,7 @@ def probe_shadows(
             ssao_enabled=False,
             shadow_map_enabled=True,
             shadow_map_size=128,
+            shadow_rays=False,
         ),
         "smap256": dict(
             quality="fast",
@@ -129,6 +131,7 @@ def probe_shadows(
             ssao_enabled=False,
             shadow_map_enabled=True,
             shadow_map_size=256,
+            shadow_rays=False,
         ),
         "sray": dict(
             quality="fast",
@@ -144,6 +147,7 @@ def probe_shadows(
             ssao_enabled=False,
             shadow_map_enabled=True,
             shadow_map_size=256,
+            shadow_rays=False,
         ),
     }
 

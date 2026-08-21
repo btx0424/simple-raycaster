@@ -34,10 +34,11 @@ class RaycastPBRCamera:
     the same ``(rgb, depth, mask)`` shapes so it can be A/B'd against Lambert.
     RGB is ACES-tonemapped LDR; linear HDR is available via ``return_hdr=True``.
 
-    Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA (no SSAO / shadows).
-    Use ``quality="pretty"`` for dumps / viewers (SSAO + 128² sun shadow map).
-    Contact shadows and shadow rays stay opt-in; contact alone is a poor
-    shadow proxy (see ``_pbr_camera.md`` probe).
+    Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA + **sun shadow rays**
+    (second closest-hit cast). Use ``quality="pretty"`` for dumps / viewers
+    (SSAO + 128² sun shadow map; no shadow rays — do not stack both).
+    Contact shadows stay opt-in; contact alone is a poor shadow proxy
+    (see ``_pbr_camera.md`` probe).
 
     Round-7 defaults (@ 192×144, N=256): ``compile_mode="max-autotune-no-cudagraphs"``
     with Torch FXAA/SSAO (compiled shade+FXAA ~2× vs eager; tiled FXAA loses to
@@ -87,7 +88,7 @@ class RaycastPBRCamera:
         shadow_map_size: int = 128,
         shadow_map_extent: float = 2.0,
         shadow_map_catch: float = 4.0,
-        shadow_rays: bool = False,
+        shadow_rays: bool | None = None,
         shadow_ray_tmax: float = 8.0,
     ) -> None:
         q = str(quality).lower().strip()
@@ -100,7 +101,12 @@ class RaycastPBRCamera:
             # Contact ≠ real shadows; keep off unless explicitly requested.
             contact_shadows_enabled = False
         if shadow_map_enabled is None:
+            # Pretty / viewers: soft-looking ortho map. Fast RL: off (use sray).
             shadow_map_enabled = pretty
+        if shadow_rays is None:
+            # Fast RL: hard sun visibility via a second ray cast. Pretty: off
+            # so we do not stack sray + smap by default.
+            shadow_rays = not pretty
 
         self.geom = RaycastCamera(
             width,
@@ -882,7 +888,10 @@ class RaycastPBRCamera:
         vis = torch.ones_like(gb["depth"])
         fx, fy, cx, cy = self.intrinsics.resolved_k()
         planar = self._planar_depth(gb)
-        need_hits = self.shadow_map_enabled or self.shadow_rays
+        # Prefer hard sray over the ortho map when both are on (do not stack).
+        use_sray = bool(self.shadow_rays)
+        use_smap = bool(self.shadow_map_enabled) and not use_sray
+        need_hits = use_smap or use_sray
         hit_w = None
         if need_hits:
             hit_w = self._hit_positions_w(gb, cam_pos_w.contiguous(), cam_quat_wxyz.contiguous())
@@ -907,7 +916,7 @@ class RaycastPBRCamera:
                 length=self.contact_shadow_length,
             )
 
-        if self.shadow_map_enabled:
+        if use_smap:
             assert hit_w is not None
             sm, center, right, up, forward = self._render_shadow_map(cam_pos_w.shape[0], sun0)
             vis = vis * sample_shadow_map(
@@ -922,7 +931,7 @@ class RaycastPBRCamera:
                 catch_dist=self.shadow_map_catch,
             )
 
-        if self.shadow_rays:
+        if use_sray:
             assert hit_w is not None
             vis = vis * self._render_shadow_rays(gb, hit_w, sun0)
 
