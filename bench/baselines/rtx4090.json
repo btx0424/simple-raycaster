@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "gate": "pbr_perf_gate",
+  "git_sha": "b83eb27",
+  "warp": "1.16.0",
+  "torch": "2.8.0+cu128",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "device": "cuda:0",
+  "n": 256,
+  "width": 192,
+  "height": 144,
+  "n_pix": 27648,
+  "warmup": 8,
+  "iters": 30,
+  "compile_mode": "max-autotune-no-cudagraphs",
+  "scene": "synthetic_ground_sphere_box",
+  "n_meshes": 3,
+  "mask_frac": 0.5815610289573669,
+  "depth_max_abs": 0.0,
+  "paths": [
+    {
+      "name": "lambert",
+      "ms_per_iter": 1.569757843017578,
+      "ms_per_cam": 0.006131866574287414,
+      "mpix_per_s": 4508.904371131555,
+      "mem_peak": 719645184,
+      "vs_lambert": 1.0
+    },
+    {
+      "name": "pbr_gbuffer",
+      "ms_per_iter": 1.7046527862548828,
+      "ms_per_cam": 0.006658799946308136,
+      "mpix_per_s": 4152.099510862912,
+      "mem_peak": 1072752640,
+      "vs_lambert": 1.0859336004195357
+    },
+    {
+      "name": "pbr_fast",
+      "ms_per_iter": 12.057838948567708,
+      "ms_per_cam": 0.04710093339284261,
+      "mpix_per_s": 586.9947368007222,
+      "mem_peak": 2053957632,
+      "vs_lambert": 7.681336966846221
+    }
+  ],
+  "headline": {
+    "name": "pbr_fast",
+    "ms_per_iter": 12.057838948567708,
+    "vs_lambert": 7.681336966846221
+  }
+}

@@ -29,7 +29,8 @@ src/simple_raycaster/
 scripts/
   example.py / advanced.py
   g1_assets.py       # Resolve G1 MJCF (env / --xml / relative) — no machine paths
-  smoke_pbr_camera.py, bench_pbr_camera.py, bench_tiled_filters.py, orbit_g1_video.py, …
+  smoke_pbr_camera.py, bench_perf_gate.py, bench_pbr_camera.py, bench_tiled_filters.py, …
+bench/               # Perf gate baselines + README (results/ gitignored)
 _pbr_camera.md       # PBR design notes + bench rounds (not user-facing README)
 _optimization.md     # Lidar / camera optimization plan
 ```
@@ -154,12 +155,16 @@ python scripts/advanced.py
 # PBR smoke (skips G1 preview if MJCF unresolved)
 python scripts/smoke_pbr_camera.py
 
-# G1 benches / orbit (need SIMPLE_RAYCASTER_G1_XML or assets/)
+# Routine perf gate (synthetic scene; JSON + optional --compare)
+python scripts/bench_perf_gate.py --json-out bench/results/latest.json
+# python scripts/bench_perf_gate.py --compare bench/baselines/rtx4090.json
+
+# G1 deep-dive benches / orbit (need SIMPLE_RAYCASTER_G1_XML or assets/)
 python scripts/bench_pbr_camera.py
 python scripts/orbit_g1_video.py --frames 36
 ```
 
-There is no `tests/` suite yet. When changing kernels or pose gathering, run `scripts/advanced.py` for numerical parity and prefer adding a small reproducible script snippet to PR notes. For PBR, run `smoke_pbr_camera.py` and note PNG paths under `scripts/_pbr_smoke/` (gitignored).
+There is no `tests/` suite yet. When changing kernels or pose gathering, run `scripts/advanced.py` for numerical parity and prefer adding a small reproducible script snippet to PR notes. For PBR, run `smoke_pbr_camera.py` and note PNG paths under `scripts/_pbr_smoke/` (gitignored). For PBR/kernel perf, run `bench_perf_gate.py` (see `bench/README.md`); use `bench_pbr_camera.py` only for G1 / pretty deep dives.
 
 ## Making Changes Safely
 

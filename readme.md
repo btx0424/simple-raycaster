@@ -35,7 +35,7 @@ Both methods return `(hit_positions, hit_distances, hit_normals)`. Normals are w
 | `RaycastPBRCamera` | Standalone G-buffer + PyTorch GGX / HDRI / ACES; optional SSAO, shadows, FXAA. |
 | `RaycastSSGICamera` | Same as PBR, but tiled SSGI replaces SSAO. |
 
-PBR defaults (192×144 benches): `compile_mode="max-autotune-no-cudagraphs"`, Torch FXAA/SSAO. Pass `compile_mode=None, fxaa_impl="tiled"` for the no-compile path. Design notes: `_pbr_camera.md`.
+PBR defaults (192×144 benches): `compile_mode="max-autotune-no-cudagraphs"`, Torch FXAA/SSAO. Pass `compile_mode=None, fxaa_impl="tiled"` for the no-compile path. Design notes: `_pbr_camera.md`. Routine perf: `scripts/bench_perf_gate.py` (see `bench/README.md`).
 
 Bundled HDRIs live under `src/simple_raycaster/pbr/assets/` (`studio`, `studio_small`, `venice_sunset` aliases via `resolve_hdri_path`).
 

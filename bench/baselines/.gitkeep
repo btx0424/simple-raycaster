@@ -1,0 +1,2 @@
+# Machine-class baselines for scripts/bench_perf_gate.py
+# Refresh only on intentional perf/stack changes (not --quick runs).
