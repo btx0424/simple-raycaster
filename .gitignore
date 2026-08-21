@@ -204,6 +204,7 @@ cython_debug/
 # Local smoke / orbit dumps
 scripts/_pbr_smoke/
 scripts/_pbr_batch_demo/
+scripts/_pbr_ground_uv/
 scripts/_orbit_g1/
 
 marimo/_lsp/
