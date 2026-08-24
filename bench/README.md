@@ -33,10 +33,15 @@ cp bench/results/latest.json bench/baselines/rtx4090.json
 .venv/bin/python scripts/bench_render_sparse.py --json-out bench/results/sparse.json
 ```
 
-On RTX 4090 @ N=256, 192×144, S=16, ~28% of tiles (strided 1/4 grid): sparse
-was ~**5.6×** faster than dense no-FXAA and ~**7×** vs dense+FXAA (eager);
-G-buffer alone ~**2.9×** (near the pixel fraction). RGB storage scales with
-tile count.
+On RTX 4090 @ N=256, 192×144, S=16 (eager, no compile):
+
+| tiles | fraction | ms/iter | vs dense no-FXAA | vs dense+FXAA |
+| --- | ---: | ---: | ---: | ---: |
+| dense no-FXAA | 100% | ~31.4 | 1× | — |
+| half (every other column) | 50% | ~13.0 | **~2.4×** | ~3.1× |
+| quarter (every other x&y) | ~28% | ~5.6 | **~5.6×** | ~7.2× |
+
+G-buffer: half ~1.8×, quarter ~3.0× (tracks pixel fraction). RGB storage scales with tile count.
 
 ## Deep-dive benches (not the daily gate)
 

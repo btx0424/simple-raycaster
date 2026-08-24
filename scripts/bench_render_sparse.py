@@ -1,6 +1,6 @@
-"""Benchmark dense ``render`` vs tile-sparse ``render_sparse`` (1/4 tiles).
+"""Benchmark dense ``render`` vs tile-sparse ``render_sparse`` (1/2 and 1/4 tiles).
 
-Synthetic scene, N=256, 192×144, tile_size=16 → 12×9=108 tiles; sparse uses 27.
+Synthetic scene, N=256, 192×144, tile_size=16 → 12×9=108 tiles.
 
     .venv/bin/python scripts/bench_render_sparse.py
     .venv/bin/python scripts/bench_render_sparse.py --json-out bench/results/sparse.json
@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import time
 from pathlib import Path
 
 import numpy as np
@@ -65,12 +64,28 @@ def _time_ms(fn, *, warmup: int, iters: int, device: torch.device) -> float:
     return float(start.elapsed_time(end) / max(iters, 1))
 
 
-def _strided_quarter_tiles(n_tx: int, n_ty: int, device: torch.device) -> torch.Tensor:
-    """Deterministic ~1/4 of the tile grid (every other tile in x and y)."""
-    xs = torch.arange(0, n_tx, 2, device=device)
-    ys = torch.arange(0, n_ty, 2, device=device)
+def _all_tiles(n_tx: int, n_ty: int, device: torch.device) -> torch.Tensor:
+    ys = torch.arange(n_ty, device=device)
+    xs = torch.arange(n_tx, device=device)
     yy, xx = torch.meshgrid(ys, xs, indexing="ij")
     return torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=-1).to(torch.int32)
+
+
+def _half_tiles(n_tx: int, n_ty: int, device: torch.device) -> torch.Tensor:
+    """~1/2 of the grid: every other column (checker columns)."""
+    all_t = _all_tiles(n_tx, n_ty, device)
+    return all_t[(all_t[:, 0] % 2) == 0].contiguous()
+
+
+def _quarter_tiles(n_tx: int, n_ty: int, device: torch.device) -> torch.Tensor:
+    """~1/4 of the grid: every other tile in x and y."""
+    all_t = _all_tiles(n_tx, n_ty, device)
+    return all_t[((all_t[:, 0] % 2) == 0) & ((all_t[:, 1] % 2) == 0)].contiguous()
+
+
+def _expand_tiles(tiles_1: torch.Tensor, n: int) -> torch.Tensor:
+    t = int(tiles_1.shape[0])
+    return tiles_1.view(1, t, 2).expand(n, t, 2).contiguous()
 
 
 @torch.no_grad()
@@ -135,7 +150,6 @@ def main() -> None:
     cam_dense.bind_meshes(raycaster, names=names, albedos=albedos)
     cam_sparse = RaycastPBRCamera(**cam_kw)
     cam_sparse.bind_meshes(raycaster, names=names, albedos=albedos)
-    # Dense no-FXAA matches sparse shade path for an apples-to-apples pixel cost.
     cam_dense_nf = RaycastPBRCamera(**{**cam_kw, "fxaa_enabled": False})
     cam_dense_nf.bind_meshes(raycaster, names=names, albedos=albedos)
 
@@ -148,37 +162,32 @@ def main() -> None:
     mesh_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=td).view(1, 1, 4).expand(n, m, 4).contiguous()
     pose_kw = dict(mesh_pos_w=mesh_pos, mesh_quat_w=mesh_quat)
 
-    tiles_1 = _strided_quarter_tiles(n_tx, n_ty, td)
-    t_count = int(tiles_1.shape[0])
-    tiles = tiles_1.view(1, t_count, 2).expand(n, t_count, 2).contiguous()
-    frac = t_count / float(n_tiles_full)
+    variants = {
+        "half": _expand_tiles(_half_tiles(n_tx, n_ty, td), n),
+        "quarter": _expand_tiles(_quarter_tiles(n_tx, n_ty, td), n),
+    }
 
-    # Correctness: sparse tiles match dense crop.
-    rgb_d, depth_d, mask_d = cam_dense_nf.render(cam_pos[:1], cam_quat[:1], **{
-        k: v[:1] for k, v in pose_kw.items()
-    })
-    rgb_s, depth_s, mask_s = cam_sparse.render_sparse(
+    # Correctness on quarter (first tile).
+    tiles_q = variants["quarter"]
+    rgb_d, _, _ = cam_dense_nf.render(
+        cam_pos[:1], cam_quat[:1], **{k: v[:1] for k, v in pose_kw.items()}
+    )
+    rgb_s, _, _ = cam_sparse.render_sparse(
         cam_pos[:1],
         cam_quat[:1],
-        tiles=tiles[:1],
+        tiles=tiles_q[:1],
         tile_size=s,
         **{k: v[:1] for k, v in pose_kw.items()},
     )
-    assert rgb_s.shape == (1, t_count, s, s, 3), rgb_s.shape
-    # Compare first tile against dense crop.
-    tx0, ty0 = int(tiles[0, 0, 0]), int(tiles[0, 0, 1])
-    y0, x0 = ty0 * s, tx0 * s
-    crop = rgb_d[0, y0 : y0 + s, x0 : x0 + s]
+    tx0, ty0 = int(tiles_q[0, 0, 0]), int(tiles_q[0, 0, 1])
+    crop = rgb_d[0, ty0 * s : ty0 * s + s, tx0 * s : tx0 * s + s]
     err = float((crop - rgb_s[0, 0]).abs().max())
-    if err > 1e-3:
-        print(f"warning: dense vs sparse tile0 max|Δ|={err:.3e}")
-    else:
-        print(f"parity tile0 max|Δ|={err:.3e}")
+    print(f"parity tile0 max|Δ|={err:.3e}" + ("" if err <= 1e-3 else "  WARNING"))
 
     print("=" * 72)
     print(
         f"render_sparse bench  N={n} {w}x{h}  S={s}  "
-        f"tiles={t_count}/{n_tiles_full} ({frac:.1%})  compile={compile_mode!r}"
+        f"full_tiles={n_tiles_full}  compile={compile_mode!r}"
     )
     print(f"gpu {torch.cuda.get_device_name(0)}")
     print("=" * 72)
@@ -195,25 +204,8 @@ def main() -> None:
         iters=args.iters,
         device=td,
     )
-    ms_sparse = _time_ms(
-        lambda: cam_sparse.render_sparse(
-            cam_pos, cam_quat, tiles=tiles, tile_size=s, **pose_kw
-        ),
-        warmup=args.warmup,
-        iters=args.iters,
-        device=td,
-    )
-    # G-buffer only.
     ms_gb = _time_ms(
         lambda: cam_dense_nf.render_gbuffer(cam_pos, cam_quat, **pose_kw),
-        warmup=args.warmup,
-        iters=args.iters,
-        device=td,
-    )
-    ms_gb_sp = _time_ms(
-        lambda: cam_sparse.render_gbuffer_sparse(
-            cam_pos, cam_quat, tiles=tiles, tile_size=s, **pose_kw
-        ),
         warmup=args.warmup,
         iters=args.iters,
         device=td,
@@ -221,26 +213,54 @@ def main() -> None:
 
     print(f"  dense pbr_fast (FXAA):     {ms_dense:8.3f} ms/iter")
     print(f"  dense no-FXAA:             {ms_dense_nf:8.3f} ms/iter")
-    print(f"  sparse 1/4 tiles:          {ms_sparse:8.3f} ms/iter")
     print(f"  gbuffer dense:             {ms_gb:8.3f} ms/iter")
-    print(f"  gbuffer sparse:            {ms_gb_sp:8.3f} ms/iter")
-    print(
-        f"\n  vs dense FXAA:   {ms_dense / ms_sparse:.2f}×  "
-        f"({(1 - ms_sparse / ms_dense) * 100:.0f}% less time)"
-    )
-    print(
-        f"  vs dense noFXAA: {ms_dense_nf / ms_sparse:.2f}×  "
-        f"({(1 - ms_sparse / ms_dense_nf) * 100:.0f}% less time)"
-    )
-    print(
-        f"  gbuffer speedup: {ms_gb / ms_gb_sp:.2f}×  "
-        f"(pixel frac {frac:.1%}, ideal ~{1 / frac:.1f}×)"
-    )
-    print(
-        f"  RGB storage: full {n * h * w * 3 * 4 / 1e6:.1f} MB fp32  vs  "
-        f"sparse {n * t_count * s * s * 3 * 4 / 1e6:.1f} MB "
-        f"({frac:.1%})"
-    )
+
+    sparse_rows: dict[str, dict] = {}
+    for label, tiles in variants.items():
+        t_count = int(tiles.shape[1])
+        frac = t_count / float(n_tiles_full)
+        ms_sp = _time_ms(
+            lambda t=tiles: cam_sparse.render_sparse(
+                cam_pos, cam_quat, tiles=t, tile_size=s, **pose_kw
+            ),
+            warmup=args.warmup,
+            iters=args.iters,
+            device=td,
+        )
+        ms_gb_sp = _time_ms(
+            lambda t=tiles: cam_sparse.render_gbuffer_sparse(
+                cam_pos, cam_quat, tiles=t, tile_size=s, **pose_kw
+            ),
+            warmup=args.warmup,
+            iters=args.iters,
+            device=td,
+        )
+        row = {
+            "n_tiles": t_count,
+            "tile_frac": frac,
+            "ms": ms_sp,
+            "ms_gbuffer": ms_gb_sp,
+            "speedup_vs_dense_fxaa": ms_dense / ms_sp,
+            "speedup_vs_dense_nofxaa": ms_dense_nf / ms_sp,
+            "gbuffer_speedup": ms_gb / ms_gb_sp,
+            "rgb_mb_fp32": n * t_count * s * s * 3 * 4 / 1e6,
+        }
+        sparse_rows[label] = row
+        print(
+            f"  sparse {label:7s} ({t_count}/{n_tiles_full}={frac:.1%}): "
+            f"{ms_sp:8.3f} ms  "
+            f"({row['speedup_vs_dense_nofxaa']:.2f}× vs noFXAA, "
+            f"{row['speedup_vs_dense_fxaa']:.2f}× vs FXAA)  "
+            f"gbuf {ms_gb_sp:.3f} ms ({row['gbuffer_speedup']:.2f}×)"
+        )
+
+    full_mb = n * h * w * 3 * 4 / 1e6
+    print(f"\n  RGB storage full: {full_mb:.1f} MB fp32")
+    for label, row in sparse_rows.items():
+        print(
+            f"  RGB storage {label:7s}: {row['rgb_mb_fp32']:.1f} MB  "
+            f"({row['tile_frac']:.1%})"
+        )
 
     blob = {
         "git_sha": _git_sha(),
@@ -250,19 +270,13 @@ def main() -> None:
         "height": h,
         "tile_size": s,
         "n_tiles_full": n_tiles_full,
-        "n_tiles_sparse": t_count,
-        "tile_frac": frac,
         "compile_mode": compile_mode,
-        "ms": {
-            "dense_fxaa": ms_dense,
-            "dense_nofxaa": ms_dense_nf,
-            "sparse": ms_sparse,
-            "gbuffer_dense": ms_gb,
-            "gbuffer_sparse": ms_gb_sp,
-        },
-        "speedup_vs_dense_fxaa": ms_dense / ms_sparse,
-        "speedup_vs_dense_nofxaa": ms_dense_nf / ms_sparse,
+        "ms_dense_fxaa": ms_dense,
+        "ms_dense_nofxaa": ms_dense_nf,
+        "ms_gbuffer_dense": ms_gb,
+        "sparse": sparse_rows,
         "parity_tile0_max_abs": err,
+        "rgb_mb_full_fp32": full_mb,
     }
     if args.json_out:
         out = Path(args.json_out)
