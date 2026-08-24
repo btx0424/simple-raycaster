@@ -13,7 +13,12 @@ import warp as wp
 from ..helpers import quat_rotate, quat_rotate_inverse, workspace_tensor
 from ..raycast_camera import CameraIntrinsics, RaycastCamera
 from .hdri import EnvironmentHDRI, default_hdri_path
-from .kernels import raycast_gbuffer_kernel, raycast_ortho_depth_kernel, shadow_ray_kernel
+from .kernels import (
+    raycast_gbuffer_kernel,
+    raycast_gbuffer_sparse_kernel,
+    raycast_ortho_depth_kernel,
+    shadow_ray_kernel,
+)
 from .materials import (
     materials_for_names,
     pack_vertex_normals,
@@ -38,6 +43,9 @@ class RaycastPBRCamera:
     and optional per-call material/light tables. Resolution, quality, HDRI, and
     textures are camera state (:meth:`set_resolution`, constructor,
     :meth:`set_ground_albedo`) — not ``render`` kwargs.
+
+    :meth:`render_sparse` renders a subset of ``tile_size`` tiles
+    (``tiles [B,T,2]`` indices) to packed ``[B,T,S,S,…]`` NHWC outputs (no FXAA/SSAO).
 
     Default ``quality="fast"`` is GGX + HDRI + ACES + FXAA + **sun shadow rays**
     (second closest-hit cast). Use ``quality="pretty"`` for dumps / viewers
@@ -954,6 +962,321 @@ class RaycastPBRCamera:
             cam_quat_wxyz=cam_quat_wxyz.contiguous(),
         )
         gb["sun_visibility"] = vis
+        if return_hdr and return_gbuffer:
+            return rgb, gb["depth"], gb["mask"], hdr, gb
+        if return_gbuffer:
+            return rgb, gb["depth"], gb["mask"], gb
+        if return_hdr:
+            return rgb, gb["depth"], gb["mask"], hdr
+        return rgb, gb["depth"], gb["mask"]
+
+    def _validate_sparse_tiles(
+        self, tiles: torch.Tensor, tile_size: int
+    ) -> tuple[torch.Tensor, int, int, int]:
+        w = self.intrinsics.width
+        h = self.intrinsics.height
+        s = int(tile_size)
+        if s <= 0:
+            raise ValueError(f"tile_size must be > 0, got {tile_size}")
+        if w % s != 0 or h % s != 0:
+            raise ValueError(
+                f"tile_size {s} must divide resolution {w}x{h} "
+                f"(got remainders {w % s}, {h % s})"
+            )
+        t = torch.as_tensor(tiles, device=self.geom.torch_device, dtype=torch.int32)
+        if t.ndim != 3 or t.shape[-1] != 2:
+            raise ValueError(f"tiles expected [B, T, 2], got {tuple(t.shape)}")
+        n_tx, n_ty = w // s, h // s
+        if bool((t[..., 0] < 0).any() or (t[..., 0] >= n_tx).any()):
+            raise ValueError(f"tile x must be in [0, {n_tx})")
+        if bool((t[..., 1] < 0).any() or (t[..., 1] >= n_ty).any()):
+            raise ValueError(f"tile y must be in [0, {n_ty})")
+        return t.contiguous(), s, n_tx, n_ty
+
+    def _hit_positions_sparse(
+        self,
+        gb: dict[str, torch.Tensor],
+        tiles: torch.Tensor,
+        tile_size: int,
+        cam_pos_w: torch.Tensor,
+        cam_quat_wxyz: torch.Tensor,
+    ) -> torch.Tensor:
+        """World hit positions for sparse tiles. ``gb`` fields are ``[N,T,S,S,…]``."""
+        depth = gb["depth"]
+        n, n_tiles, s, _ = depth.shape
+        device = depth.device
+        fx, fy, cx, cy = self.intrinsics.resolved_k()
+        tx = tiles[:, :, 0].to(dtype=torch.float32)  # [N,T]
+        ty = tiles[:, :, 1].to(dtype=torch.float32)
+        ys = torch.arange(s, device=device, dtype=torch.float32)
+        xs = torch.arange(s, device=device, dtype=torch.float32)
+        # local (ly, lx); pixel = tile*S + local
+        ly, lx = torch.meshgrid(ys, xs, indexing="ij")
+        px = tx[:, :, None, None] * float(s) + lx[None, None, :, :]
+        py = ty[:, :, None, None] * float(s) + ly[None, None, :, :]
+        u = (px + 0.5 - cx) / fx
+        v = (py + 0.5 - cy) / fy
+        if self.intrinsics.convention == "opencv":
+            dir_c = torch.stack([u, v, torch.ones_like(u)], dim=-1)
+        else:
+            dir_c = torch.stack([u, -v, -torch.ones_like(u)], dim=-1)
+        dir_c = dir_c / dir_c.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        quat = cam_quat_wxyz[:, None, None, None, :].expand(n, n_tiles, s, s, 4)
+        dir_w = quat_rotate(quat, dir_c)
+        if self.intrinsics.depth_mode == "planar":
+            optical_z = dir_c[..., 2] if self.intrinsics.convention == "opencv" else -dir_c[..., 2]
+            t = depth / optical_z.clamp_min(1e-8)
+        else:
+            t = depth
+        return cam_pos_w[:, None, None, None, :] + dir_w * t.unsqueeze(-1)
+
+    @torch.no_grad()
+    def render_gbuffer_sparse(
+        self,
+        cam_pos_w: torch.Tensor,
+        cam_quat_wxyz: torch.Tensor,
+        *,
+        tiles: torch.Tensor,
+        tile_size: int,
+        mesh_pos_w: torch.Tensor | None = None,
+        mesh_quat_w: torch.Tensor | None = None,
+        origin_w: torch.Tensor | None = None,
+        env_ids: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Closest-hit G-buffer for selected tiles only.
+
+        ``tiles`` is ``[B, T, 2]`` integer ``(tx, ty)`` in tile-grid units.
+        Returns fields shaped ``[B, T, S, S, …]`` (``S=tile_size``).
+        """
+        tiles_i, s, _, _ = self._validate_sparse_tiles(tiles, tile_size)
+        if (
+            not self.geom.initialized
+            or self._rough_wp is None
+            or self._albedo_wp is None
+            or self._vert_normal_wp is None
+            or self._vert_uv_wp is None
+            or self._mesh_tex_id_wp is None
+            or self._albedo_tex_wp is None
+        ):
+            self.initialize()
+
+        n = cam_pos_w.shape[0]
+        if tiles_i.shape[0] != n:
+            raise ValueError(f"tiles batch {tiles_i.shape[0]} != cameras {n}")
+        n_tiles = int(tiles_i.shape[1])
+        p = n_tiles * s * s
+        fx, fy, cx, cy = self.intrinsics.resolved_k()
+        convention = 0 if self.intrinsics.convention == "opencv" else 1
+        depth_mode = 0 if self.intrinsics.depth_mode == "planar" else 1
+        mesh_pos, mesh_quat = self.geom._gather_mesh_poses(
+            n,
+            mesh_pos_w=mesh_pos_w,
+            mesh_quat_w=mesh_quat_w,
+            origin_w=origin_w,
+            env_ids=env_ids,
+        )
+        self._last_mesh_pos = mesh_pos
+        self._last_mesh_quat = mesh_quat
+        self._last_cam_pos = cam_pos_w.contiguous()
+        self._last_cam_quat = cam_quat_wxyz.contiguous()
+
+        depth = self._cached("sp_depth", (n, p), torch.float32)
+        mask = self._cached("sp_mask", (n, p), torch.bool)
+        normal = self._cached("sp_nrm", (n, p, 3), torch.float32)
+        albedo = self._cached("sp_alb", (n, p, 3), torch.float32)
+        rough = self._cached("sp_rough", (n, p), torch.float32)
+        metal = self._cached("sp_metal", (n, p), torch.float32)
+        view = self._cached("sp_view", (n, p, 3), torch.float32)
+
+        wp.launch(
+            raycast_gbuffer_sparse_kernel,
+            dim=(n, p),
+            inputs=[
+                self.geom.meshes_array,
+                wp.from_torch(mesh_pos, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(mesh_quat, dtype=wp.vec4, return_ctype=True),
+                self._albedo_wp,
+                self._rough_wp,
+                self._metal_wp,
+                self._mesh_tex_id_wp,
+                self._vert_normal_wp,
+                self._vert_uv_wp,
+                self._vert_offset_wp,
+                self._albedo_tex_wp,
+                wp.from_torch(cam_pos_w.contiguous(), dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(cam_quat_wxyz.contiguous(), dtype=wp.vec4, return_ctype=True),
+                wp.from_torch(tiles_i, dtype=wp.int32, return_ctype=True),
+                int(s),
+                float(fx),
+                float(fy),
+                float(cx),
+                float(cy),
+                float(self.intrinsics.near),
+                float(self.intrinsics.far),
+                convention,
+                depth_mode,
+                1 if self.smooth_normals else 0,
+            ],
+            outputs=[
+                wp.from_torch(depth, dtype=wp.float32, return_ctype=True),
+                wp.from_torch(mask, dtype=wp.bool, return_ctype=True),
+                wp.from_torch(normal, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(albedo, dtype=wp.vec3, return_ctype=True),
+                wp.from_torch(rough, dtype=wp.float32, return_ctype=True),
+                wp.from_torch(metal, dtype=wp.float32, return_ctype=True),
+                wp.from_torch(view, dtype=wp.vec3, return_ctype=True),
+            ],
+            device=self.geom.device,
+            record_tape=False,
+            block_dim=self.geom.block_dim,
+        )
+        return {
+            "depth": depth.view(n, n_tiles, s, s),
+            "mask": mask.view(n, n_tiles, s, s),
+            "normal": normal.view(n, n_tiles, s, s, 3),
+            "albedo": albedo.view(n, n_tiles, s, s, 3),
+            "roughness": rough.view(n, n_tiles, s, s),
+            "metallic": metal.view(n, n_tiles, s, s),
+            "view": view.view(n, n_tiles, s, s, 3),
+            "tiles": tiles_i,
+            "tile_size": s,
+        }
+
+    @torch.no_grad()
+    def render_sparse(
+        self,
+        cam_pos_w: torch.Tensor,
+        cam_quat_wxyz: torch.Tensor,
+        *,
+        tiles: torch.Tensor,
+        tile_size: int,
+        mesh_pos_w: torch.Tensor | None = None,
+        mesh_quat_w: torch.Tensor | None = None,
+        origin_w: torch.Tensor | None = None,
+        env_ids: torch.Tensor | None = None,
+        albedo: Sequence | torch.Tensor | None = None,
+        roughness: Sequence | torch.Tensor | float | None = None,
+        metallic: Sequence | torch.Tensor | float | None = None,
+        sun_dir: Sequence | torch.Tensor | None = None,
+        sun_color: Sequence | torch.Tensor | None = None,
+        sun_intensity: Sequence | torch.Tensor | float | None = None,
+        exposure: Sequence | torch.Tensor | float | None = None,
+        return_hdr: bool = False,
+        return_gbuffer: bool = False,
+    ):
+        """Render selected image tiles (no FXAA / SSAO).
+
+        Args:
+            tiles: ``[B, T, 2]`` int tile indices ``(tx, ty)`` in
+                ``[0, W/S) × [0, H/S)``.
+            tile_size: ``S``; must divide camera width and height.
+
+        Returns:
+            ``(rgb, depth, mask)`` with shapes
+            ``[B, T, S, S, 3]``, ``[B, T, S, S]``, ``[B, T, S, S]`` (NHWC).
+            Optional HDR / G-buffer like :meth:`render`.
+        """
+        if any(x is not None for x in (albedo, roughness, metallic)):
+            self.set_materials(albedo=albedo, roughness=roughness, metallic=metallic)
+        if any(x is not None for x in (sun_dir, sun_color, sun_intensity, exposure)):
+            self.set_lights(
+                sun_dir=sun_dir,
+                sun_color=sun_color,
+                sun_intensity=sun_intensity,
+                exposure=exposure,
+            )
+
+        gb = self.render_gbuffer_sparse(
+            cam_pos_w,
+            cam_quat_wxyz,
+            tiles=tiles,
+            tile_size=tile_size,
+            mesh_pos_w=mesh_pos_w,
+            mesh_quat_w=mesh_quat_w,
+            origin_w=origin_w,
+            env_ids=env_ids,
+        )
+        sun = self._sun_dir_t
+        n_cam = cam_pos_w.shape[0]
+        if sun.shape[0] == 1 and n_cam > 1:
+            sun_b = sun.expand(n_cam, 3)
+        elif sun.shape[0] == n_cam:
+            sun_b = sun
+        else:
+            raise ValueError(f"sun_dir batch {sun.shape[0]} != cameras {n_cam}")
+
+        n, n_tiles, s, _ = gb["depth"].shape
+        p = n_tiles * s * s
+        vis = torch.ones_like(gb["depth"])
+        use_sray = bool(self.shadow_rays)
+        use_smap = bool(self.shadow_map_enabled) and not use_sray
+        hit_w = None
+        if use_smap or use_sray:
+            hit_w = self._hit_positions_sparse(
+                gb, gb["tiles"], int(gb["tile_size"]), cam_pos_w.contiguous(), cam_quat_wxyz.contiguous()
+            )
+            gb["position"] = hit_w
+
+        sun0 = sun_b[0]
+        # Contact / SSAO need a dense neighborhood — skipped in sparse path.
+        if use_smap:
+            assert hit_w is not None
+            sm, center, right, up, forward = self._render_shadow_map(n_cam, sun0)
+            # Flatten tiles to a fake [N,1,P] grid for the dense sampler.
+            vis = sample_shadow_map(
+                hit_w.reshape(n, 1, p, 3),
+                gb["mask"].reshape(n, 1, p),
+                sm,
+                center_w=center,
+                right_w=right,
+                up_w=up,
+                forward_w=forward,
+                half_extent=self.shadow_map_extent,
+                catch_dist=self.shadow_map_catch,
+            ).view(n, n_tiles, s, s)
+
+        if use_sray:
+            assert hit_w is not None
+            vis_flat = self._cached("sp_sray", (n, p), torch.float32)
+            wp.launch(
+                shadow_ray_kernel,
+                dim=(n, p),
+                inputs=[
+                    self.geom.meshes_array,
+                    wp.from_torch(self._last_mesh_pos, dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(self._last_mesh_quat, dtype=wp.vec4, return_ctype=True),
+                    wp.from_torch(hit_w.reshape(n, p, 3).contiguous(), dtype=wp.vec3, return_ctype=True),
+                    wp.from_torch(gb["mask"].reshape(n, p).contiguous(), dtype=wp.bool, return_ctype=True),
+                    wp.vec3(float(sun0[0]), float(sun0[1]), float(sun0[2])),
+                    2.0e-3,
+                    float(self.shadow_ray_tmax),
+                ],
+                outputs=[wp.from_torch(vis_flat, dtype=wp.float32, return_ctype=True)],
+                device=self.geom.device,
+                record_tape=False,
+                block_dim=self.geom.block_dim,
+            )
+            vis = vis_flat.view(n, n_tiles, s, s)
+
+        # Shade without FXAA/SSAO (tile patches have no full-frame neighborhood).
+        sun_color, sun_intensity, exposure = self._broadcast_light_rows(n)
+        hdr = shade_pbr(
+            gb["albedo"],
+            gb["normal"],
+            gb["view"],
+            gb["roughness"],
+            gb["metallic"],
+            self.env,
+            sun_dir_w=sun_b,
+            sun_intensity=sun_intensity,
+            sun_color=sun_color,
+            sun_visibility=vis,
+        )
+        bg = self.env.sample(-gb["view"], roughness=0.0)
+        hdr = torch.where(gb["mask"].unsqueeze(-1), hdr, bg)
+        rgb = aces_tonemap(hdr, exposure=exposure)
+        gb["sun_visibility"] = vis
+
         if return_hdr and return_gbuffer:
             return rgb, gb["depth"], gb["mask"], hdr, gb
         if return_gbuffer:

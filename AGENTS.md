@@ -68,6 +68,8 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 * Functional / replay-ticket usage: `render` takes poses + optional
   material/light tables; resolution/quality/HDRI/textures are camera state.
   See **readme.md → “PBR camera (functional / replay-ticket style)”**.
+* Tile-sparse: `render_sparse(tiles, tile_size=S)` → `[B,T,S,S,…]` NHWC
+  (no FXAA). Bench: `scripts/bench_render_sparse.py`.
 
 ## Which Raycaster to Use
 

@@ -24,6 +24,20 @@ cp bench/results/latest.json bench/baselines/rtx4090.json
 
 `--quick` lowers warmup/iters for agent loops; **do not** refresh baselines from `--quick` runs.
 
+## Tile-sparse render
+
+`RaycastPBRCamera.render_sparse(tiles=[B,T,2], tile_size=S)` returns packed
+`[B,T,S,S,3]` RGB (NHWC) for selected tile indices. FXAA/SSAO are skipped.
+
+```bash
+.venv/bin/python scripts/bench_render_sparse.py --json-out bench/results/sparse.json
+```
+
+On RTX 4090 @ N=256, 192×144, S=16, ~28% of tiles (strided 1/4 grid): sparse
+was ~**5.6×** faster than dense no-FXAA and ~**7×** vs dense+FXAA (eager);
+G-buffer alone ~**2.9×** (near the pixel fraction). RGB storage scales with
+tile count.
+
 ## Deep-dive benches (not the daily gate)
 
 | Script | When |
