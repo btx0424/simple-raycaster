@@ -193,10 +193,18 @@ class MultiMeshRaycasterV2:
     def add_isaac_entity(self, entity: IsaacEntity) -> List[str]:
         """Register a dynamic Isaac Lab articulation or rigid object.
 
-        Loads one visual mesh per body from the current USD stage. Body prim paths
-        are derived from ``entity.root_physx_view.prim_paths[0]`` by substituting
-        each name in ``entity.body_names``. At raycast time, poses are read from
-        ``entity.data.body_link_pose_w`` (WXYZ quaternions).
+        Loads one visual mesh per body from the current USD stage, **in
+        ``entity.body_names`` order**. At raycast time, poses are read from
+        ``entity.data.body_link_pose_w`` (WXYZ), which uses the same order —
+        so mesh index ``i`` always pairs with body ``i``.
+
+        Body prim paths follow the same rules as AA
+        ``envs/backends/isaac/meshes.entity_body_prim_paths``:
+
+        * If ``root_physx_view.prim_paths[0]`` ends with ``body_names[0]``,
+          substitute each body name (legacy layout).
+        * Otherwise treat the root as a container (e.g. ``.../Robot``) and use
+          ``{root}/{body_name}/visuals``.
 
         Args:
             entity: An Isaac Lab ``Articulation`` or ``RigidObject`` instance.
@@ -206,30 +214,49 @@ class MultiMeshRaycasterV2:
             List of matched prim path strings (one entry per body mesh).
 
         Raises:
-            ValueError: If the number of matched prims does not equal
-                ``entity.num_bodies``, or if entity/mesh registration is inconsistent.
-
-        Note:
-            Primarily tested with ``Articulation``; ``RigidObject`` support is
-            untested but follows the same body/visual layout.
+            ValueError: If a body has no / ambiguous visuals, or registration
+                counts go out of sync.
         """
         from isaacsim.core.utils.stage import get_current_stage
+        from .utils_usd import find_matching_prims, get_trimesh_from_prim
+
         stage = get_current_stage()
-        # template path is, for example, /World/envs/env_0/robot/base_link for an Articulation
-        # we will need to find the paths for other bodies in the articulation
-        template_path = entity.root_physx_view.prim_paths[0]
-        root_body_name = template_path.split("/")[-1]
-        if root_body_name == entity.body_names[0]:
+        template_path = entity.root_physx_view.prim_paths[0].rstrip("/")
+        root_prim_name = template_path.split("/")[-1]
+        if root_prim_name == entity.body_names[0]:
             prim_paths = [
-                template_path.replace(root_body_name, body_name) + "/visuals"
+                template_path.replace(root_prim_name, body_name) + "/visuals"
                 for body_name in entity.body_names
             ]
-        prim_paths = self._add_from_path(prim_paths, stage, combine=False)
-        if len(prim_paths) != entity.num_bodies:
-            raise ValueError(f"Number of prim paths {len(prim_paths)} does not match number of bodies {entity.num_bodies}")
+        else:
+            # Container root (e.g. .../Robot): children at {root}/{body}/visuals
+            prim_paths = [
+                f"{template_path}/{body_name}/visuals"
+                for body_name in entity.body_names
+            ]
+
+        # Load **per body in body_names order**. Do NOT regex-union all paths and
+        # rely on Usd.Stage.Traverse() order — that permutes meshes relative to
+        # body_link_pose_w and yields scrambled raycast / camera hits.
+        matched: List[str] = []
+        for body_name, path in zip(entity.body_names, prim_paths):
+            prims = find_matching_prims(path, stage)
+            if len(prims) != 1:
+                raise ValueError(
+                    f"Expected exactly one visuals prim for body {body_name!r} "
+                    f"at {path!r}, found {len(prims)}"
+                )
+            self._add_mesh(get_trimesh_from_prim(prims[0]))
+            matched.append(prims[0].GetPath().pathString)
+
+        if len(matched) != entity.num_bodies:
+            raise ValueError(
+                f"Number of prim paths {len(matched)} does not match "
+                f"number of bodies {entity.num_bodies}"
+            )
         self.entities.append(entity)
         self._validate_registration()
-        return prim_paths
+        return matched
     
     def raycast(
         self,

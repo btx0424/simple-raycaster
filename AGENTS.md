@@ -72,7 +72,9 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 
 * Construct with `device` only; register geometry via Isaac helpers:
   * `add_isaac_static(prim_path)` — one combined static mesh, identity pose
-  * `add_isaac_entity(entity)` — one mesh per body, poses from `entity.data.body_link_pose_w`
+  * `add_isaac_entity(entity)` — one mesh per body **in ``body_names`` order**,
+  poses from `entity.data.body_link_pose_w` (same order). Do not rely on
+  USD Traverse order when loading multi-body visuals.
 * `raycast` / `raycast_fused` take **only rays** (plus optional `enabled`, `mesh_indices`).
 * Internal helpers `_add_mesh`, `_add_from_path` are private; always pair mesh loading with an entity registration entry.
 * `_validate_registration()` runs after each `add_isaac_*` and again in `initialize()` to ensure entity/mesh counts match.
@@ -119,7 +121,10 @@ Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays], hit_normals
 ## Common Pitfalls
 
 1. **V2 mesh/entity mismatch** — calling internal add helpers without `add_isaac_*` leaves `entities` out of sync with `meshes_wp`.
-2. **Prim path regex** — `add_isaac_entity` uses `entity.root_physx_view.prim_paths[0]` as a template; matched visual count must equal `entity.num_bodies`.
+2. **Prim path layout** — `add_isaac_entity` handles both root-is-first-body
+   (string replace) and container roots like `.../Robot/{body}/visuals`.
+   Matched visual count must equal `entity.num_bodies`, one mesh per body in
+   `body_names` order (never batch-regex + Traverse order).
 3. **USD import timing** — `from pxr import Usd` fails before Isaac `AppLauncher` unless standalone `usd-core` is installed.
 4. **Empty raycast** — raycasting with zero registered meshes raises in `_get_mesh_poses_w`.
 5. **Selective indices shape** — with `mesh_indices`, pose tensors and indices must share the same `[N, n_subset]` mesh dimension.
