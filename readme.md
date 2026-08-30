@@ -186,7 +186,7 @@ rgb, depth, mask = cam.render(
 | `return_hdr` / `return_gbuffer` | **Yes** | `render` kwarg | Output switches only. |
 | Resolution / FOV | **No** | ctor / `set_resolution` | **Removed** from `render` — changing H×W specializes compile. |
 | Mesh topology / names | **No** | `bind_meshes` / `bind_trimeshes` | Rebind invalidates geometry. |
-| HDRI, albedo textures, UVs | **No** | ctor / `set_ground_albedo` / `set_albedo_textures` | Shared assets. |
+| HDRI, albedo textures, UVs | **No** | ctor / `set_ground_albedo` / `set_albedo_textures` | Shared assets. Bundled Poly Haven HDR/JPG aliases are **downloaded on first use** (CC0, cached under `pbr/assets/`). |
 | `quality`, sray/smap, FXAA/SSAO, `compile_mode` | **No** | ctor | Keep identical for collect and replay. |
 
 **Ticket minimum:** camera pose + mesh poses (+ material/light rows or DR seed).  

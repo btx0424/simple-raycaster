@@ -9,9 +9,17 @@ from typing import Sequence
 
 import numpy as np
 
+from .assets_fetch import ensure_polyhaven_albedo
+
 _ASSETS = Path(__file__).resolve().parent / "assets" / "textures"
 
-# Poly Haven CC0 diffuse (1K JPG). Loaded via ImageMagick ``convert`` (no Pillow).
+# Poly Haven CC0 diffuse (1K JPG). Fetched on first use; decode via ImageMagick.
+_BUNDLED_ALBEDO_IDS: dict[str, str] = {
+    "forest_ground": "forest_ground_04",
+    "mud_forest": "mud_forest",
+    "rocky_trail": "rocky_trail_02",
+    "concrete_floor": "concrete_floor",
+}
 BUNDLED_ALBEDOS: dict[str, Path] = {
     "forest_ground": _ASSETS / "forest_ground_04_diff_1k.jpg",
     "mud_forest": _ASSETS / "mud_forest_diff_1k.jpg",
@@ -29,8 +37,8 @@ def resolve_albedo_path(name_or_path: str | Path) -> Path:
     key = str(name_or_path).strip().lower()
     if key in BUNDLED_ALBEDOS:
         path = BUNDLED_ALBEDOS[key]
-    else:
-        path = Path(name_or_path)
+        return ensure_polyhaven_albedo(path, asset_id=_BUNDLED_ALBEDO_IDS[key])
+    path = Path(name_or_path)
     if not path.is_file():
         raise FileNotFoundError(f"albedo texture missing: {path}")
     return path

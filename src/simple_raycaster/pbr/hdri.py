@@ -7,10 +7,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .assets_fetch import ensure_polyhaven_hdri
+
 _ASSETS = Path(__file__).resolve().parent / "assets"
 DEFAULT_HDRI = _ASSETS / "poly_haven_studio_1k.hdr"
 
-# Extra bundled maps for A/B (same folder, CC0 Poly Haven 1K).
+# Extra bundled maps for A/B (same folder, CC0 Poly Haven 1K). Fetched on first use.
+_BUNDLED_HDRI_IDS: dict[str, str] = {
+    "studio": "poly_haven_studio",
+    "studio_small": "studio_small_09",
+    "venice_sunset": "venice_sunset",
+}
 BUNDLED_HDRIS: dict[str, Path] = {
     "studio": DEFAULT_HDRI,
     "studio_small": _ASSETS / "studio_small_09_1k.hdr",
@@ -23,10 +30,12 @@ _A1 = 2.0 * np.pi / 3.0
 _A2 = np.pi / 4.0
 
 
+def _ensure_bundled_hdri(alias: str, path: Path) -> Path:
+    return ensure_polyhaven_hdri(path, asset_id=_BUNDLED_HDRI_IDS[alias])
+
+
 def default_hdri_path() -> Path:
-    if not DEFAULT_HDRI.is_file():
-        raise FileNotFoundError(f"bundled HDRI missing: {DEFAULT_HDRI}")
-    return DEFAULT_HDRI
+    return _ensure_bundled_hdri("studio", DEFAULT_HDRI)
 
 
 def resolve_hdri_path(name_or_path: str | Path | None = None) -> Path:
@@ -36,8 +45,8 @@ def resolve_hdri_path(name_or_path: str | Path | None = None) -> Path:
     key = str(name_or_path).strip().lower()
     if key in BUNDLED_HDRIS:
         path = BUNDLED_HDRIS[key]
-    else:
-        path = Path(name_or_path)
+        return _ensure_bundled_hdri(key, path)
+    path = Path(name_or_path)
     if not path.is_file():
         raise FileNotFoundError(f"HDRI not found: {path} (aliases: {sorted(BUNDLED_HDRIS)})")
     return path

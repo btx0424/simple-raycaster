@@ -208,5 +208,10 @@ scripts/_pbr_ground_uv/
 scripts/_orbit_g1/
 bench/results/
 
+# Bundled PBR assets (lazy-fetched from Poly Haven on first use)
+src/simple_raycaster/pbr/assets/*.hdr
+src/simple_raycaster/pbr/assets/textures/*.jpg
+src/simple_raycaster/pbr/assets/**/*.part
+
 marimo/_lsp/
 __marimo__/
