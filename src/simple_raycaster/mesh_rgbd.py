@@ -14,7 +14,7 @@ import trimesh
 
 from .diffrast_camera import DiffrastCamera
 from .mesh_cache import build_simplified_body_trimeshes, merge_rgbd
-from .raycast_camera import RaycastCamera
+from .raycast_camera import CameraIntrinsics, RaycastCamera
 
 MeshRendererKind = Literal["diffrast", "raycast"]
 
@@ -128,7 +128,7 @@ class RaycastMeshRenderer(MeshRGBDRenderer):
         self.device = torch.device(device)
         self.face_keep = float(face_keep)
         self.light_dir = tuple(float(x) for x in light_dir)
-        self._cams: list[tuple[str, RaycastCamera]] = []
+        self._cams: list[tuple[str, RaycastCamera, object, list[int]]] = []
 
     @property
     def has_meshes(self) -> bool:
@@ -143,7 +143,7 @@ class RaycastMeshRenderer(MeshRGBDRenderer):
         entity: object,
         meshes: Sequence[trimesh.Trimesh],
     ) -> None:
-        self._cams = [(n, c) for n, c in self._cams if n != name]
+        self._cams = [(n, c, e, b) for n, c, e, b in self._cams if n != name]
         kept, body_ids, albedos = build_simplified_body_trimeshes(
             list(meshes), face_keep=self.face_keep
         )
@@ -158,13 +158,8 @@ class RaycastMeshRenderer(MeshRGBDRenderer):
             device=self.device,
             light_dir=self.light_dir,
         )
-        cam.bind_trimeshes(
-            kept,
-            albedos=albedos,
-            pose_entity=entity,
-            pose_body_ids=body_ids,
-        )
-        self._cams.append((name, cam))
+        cam.bind_trimeshes(kept, albedos=albedos)
+        self._cams.append((name, cam, entity, body_ids))
         n_faces = sum(len(m.faces) for m in kept)
         n_verts = sum(len(m.vertices) for m in kept)
         print(
@@ -191,24 +186,33 @@ class RaycastMeshRenderer(MeshRGBDRenderer):
 
         light = self.light_dir if light_dir is None else light_dir
         rgb_acc = depth_acc = mask_acc = None
-        for _name, cam in self._cams:
-            cam.intrinsics = type(cam.intrinsics)(
+        for _name, cam, entity, body_ids in self._cams:
+            intr = cam.intrinsics
+            cam.intrinsics = CameraIntrinsics(
                 width=width,
                 height=height,
                 fov_y_deg=fov_y_deg,
                 near=near,
                 far=far,
-                convention=cam.intrinsics.convention,
-                depth_mode=cam.intrinsics.depth_mode,
+                convention=intr.convention,
+                depth_mode=intr.depth_mode,
             )
+            poses = entity.data.body_link_pose_w
+            cam_pos = cam_pos_w
+            cam_quat = cam_quat_wxyz
+            if env_ids is not None:
+                poses = poses[env_ids]
+                cam_pos = cam_pos_w[env_ids]
+                cam_quat = cam_quat_wxyz[env_ids]
+            mesh_pos = poses[:, body_ids, :3]
+            mesh_quat = poses[:, body_ids, 3:7]
+            if origin_w is not None:
+                mesh_pos = mesh_pos - origin_w.unsqueeze(1)
             rgb, depth, mask = cam.render(
-                cam_pos_w,
-                cam_quat_wxyz,
-                origin_w=origin_w,
-                env_ids=env_ids,
-                width=width,
-                height=height,
-                fov_y_deg=fov_y_deg,
+                cam_pos,
+                cam_quat,
+                mesh_pos_w=mesh_pos.contiguous(),
+                mesh_quat_w=mesh_quat.contiguous(),
                 light_dir=light,
             )
             rgb_acc, depth_acc, mask_acc = merge_rgbd(

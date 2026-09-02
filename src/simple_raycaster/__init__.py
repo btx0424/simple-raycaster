@@ -13,14 +13,13 @@ from .pbr import (
     default_hdri_path,
     resolve_hdri_path,
 )
-from .proximity import MeshProximitySensor
+from .proximity import MESH_PROXIMITY_UPDATE_REQUIRED, MeshProximitySensor
 from .raycast_camera import CameraIntrinsics, RaycastCamera
 from .raycaster import MultiMeshRaycaster
-from .raycaster_v2 import MultiMeshRaycasterV2
 
 __all__ = [
+    "MESH_PROXIMITY_UPDATE_REQUIRED",
     "MultiMeshRaycaster",
-    "MultiMeshRaycasterV2",
     "MeshProximitySensor",
     "RaycastCamera",
     "RaycastPBRCamera",

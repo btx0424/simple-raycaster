@@ -13,10 +13,9 @@ Intended usage:
 
 | Class | Use when |
 | --- | --- |
-| `MultiMeshRaycaster` | You manage mesh geometry and poses yourself (standalone scripts, MuJoCo, offline USD). |
-| `MultiMeshRaycasterV2` | You run inside Isaac Sim / Isaac Lab and want poses pulled automatically from `Articulation` / `RigidObject` instances. |
+| `MultiMeshRaycaster` | You manage mesh geometry and poses yourself (standalone scripts, MuJoCo, offline USD, or AA `MeshRegistry`). |
 
-Both classes expose:
+`MultiMeshRaycaster` exposes:
 
 * `raycast(...)` — GPU PyTorch world→mesh transform, then a separate Warp `raycast_kernel` (two GPU steps)
 * `raycast_fused(...)` — single fused Warp kernel for transform + raycast (preferred; fewer temporaries)
@@ -67,9 +66,10 @@ pip install usd-core types-usd
 
 Note: `usd-core` may conflict with OmniUSD shipped with Isaac Sim.
 
-## Isaac Sim (for V2 only)
+## Isaac Sim / Lab
 
-`MultiMeshRaycasterV2` imports `isaacsim` and `isaaclab` at runtime when registering entities. Install/use it inside an Isaac Lab environment where those packages are available.
+Use ``utils_usd`` and ``MultiMeshRaycaster`` with explicit poses. In
+active-adaptation, prefer ``MeshRegistry`` for geometry + pose refresh.
 
 # Examples
 
@@ -194,44 +194,11 @@ rgb, depth, mask = cam.render(
 
 Use a small fixed set of `N` (e.g. `num_envs` and `train_batch_size`), warm each once, and avoid alternating arbitrary sizes so workspaces and `torch.compile` stay hot.
 
-## Isaac Lab integration (`MultiMeshRaycasterV2`)
+## Isaac Lab (active-adaptation)
 
-V2 registers meshes once, then reads live body poses from Isaac entities on each raycast. You do **not** pass `mesh_pos_w` / `mesh_quat_w`.
-
-```python
-import warp as wp
-import torch
-from simple_raycaster import MultiMeshRaycasterV2
-
-wp.init()
-
-raycaster = MultiMeshRaycasterV2(device="cuda")
-
-# Static geometry baked into world-frame mesh data (pose stays identity)
-raycaster.add_isaac_static("/World/ground")
-
-# Dynamic robot / object: one mesh per body, poses from entity.data.body_link_pose_w
-robot = env.scene.articulations["robot"]
-raycaster.add_isaac_entity(robot)
-
-N = env.num_envs
-ray_starts = ...  # [N, n_rays, 3]
-ray_dirs = ...    # [N, n_rays, 3], normalized
-
-hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
-    ray_starts,
-    ray_dirs,
-    min_dist=0.1,
-    max_dist=5.0,
-)
-```
-
-Registration rules for V2:
-
-* Call `add_isaac_static` / `add_isaac_entity` only — do not call internal `_add_mesh` / `_add_from_path`.
-* Each `add_isaac_static` adds one combined mesh at a fixed world pose (identity).
-* Each `add_isaac_entity` adds one mesh per body; visual prim count must match `entity.num_bodies`.
-* Batch size `N` in ray tensors must equal `entity.num_instances`.
+Use ``active_adaptation.envs.mesh_registry.MeshRegistry`` to load body-local
+visuals and refresh ``mesh_pos_w`` / ``mesh_quat_w`` each step, then call
+``MultiMeshRaycaster.raycast_fused`` or ``RaycastCamera.render`` with explicit poses.
 
 ## Loading from USD
 
@@ -283,8 +250,6 @@ hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
     max_dist=10.0,
 )
 ```
-
-With V2, omit `mesh_pos` / `mesh_quat` and pass only rays plus optional `mesh_indices`.
 
 # Scripts
 

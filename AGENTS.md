@@ -6,9 +6,8 @@ Agent-oriented guide for working in `simple-raycaster`. Also check the [Warp cha
 
 ```
 src/simple_raycaster/
-  raycaster.py       # MultiMeshRaycaster (manual poses)
-  raycaster_v2.py    # MultiMeshRaycasterV2 (Isaac entity poses)
-  proximity.py       # MeshProximitySensor (closest-point / SDF-style queries)
+  raycaster.py       # MultiMeshRaycaster (explicit mesh_pos_w / mesh_quat_w)
+  proximity.py       # MeshProximitySensor (rewrite pending — see MESH_PROXIMITY_UPDATE_REQUIRED)
   raycast_camera.py  # RaycastCamera — Lambert RGB-D megakernel (do not break for GS A/B)
   diffrast_camera.py # DiffrastCamera — nvdiffrast RGB-D (optional dep)
   mesh_cache.py      # CachedEntityMesh + simplify / pose helpers
@@ -43,8 +42,8 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 
 * Pinhole **RGB-D** mesh renderers for 3DGS composite in active-adaptation
   (`task.visual.mesh_renderer: diffrast|raycast`). AA only depth-composites.
-* **Not** a replacement for AA’s MDP obs `extero.raycast_camera` — that stays on
-  `MultiMeshRaycasterV2` for range sensing.
+* **Not** a replacement for AA’s MDP obs `raycast_camera` — that uses
+  `LambertRaycastCameraSensor` + `MeshRegistry` for range sensing / RGB-D.
 * Shared API shape: register / bind body-local meshes, then
   `render(cam_pos, cam_quat, …) → (rgb, depth, mask)` (OpenCV convention).
 * Prefer `make_mesh_rgbd_renderer("diffrast"|"raycast")` for multi-entity use.
@@ -79,30 +78,16 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 * Caller supplies `mesh_pos_w` `[N, n_meshes, 3]` and `mesh_quat_w` `[N, n_meshes, 4]` on every `raycast` / `raycast_fused` call.
 * Supports `add_mesh`, `add_from_path` for incremental setup.
 
-### `MultiMeshRaycasterV2` (`raycaster_v2.py`)
-
-* Construct with `device` only; register geometry via Isaac helpers:
-  * `add_isaac_static(prim_path)` — one combined static mesh, identity pose
-  * `add_isaac_entity(entity)` — one mesh per body **in ``body_names`` order**,
-  poses from `entity.data.body_link_pose_w` (same order). Do not rely on
-  USD Traverse order when loading multi-body visuals.
-* `raycast` / `raycast_fused` take **only rays** (plus optional `enabled`, `mesh_indices`).
-* Internal helpers `_add_mesh`, `_add_from_path` are private; always pair mesh loading with an entity registration entry.
-* `_validate_registration()` runs after each `add_isaac_*` and again in `initialize()` to ensure entity/mesh counts match.
-* Batch size `N` is validated at raycast time against `entity.num_instances`.
-* TODO in source: add non-Isaac backends — do not assume V2 works outside Isaac Sim today.
-
 ### `MeshProximitySensor` (`proximity.py`)
 
-* Closest-point queries via Warp `mesh_query_point_no_sign` (or `sign_normal` when `signed=True`).
-* Reuses `MultiMeshRaycasterV2` registration (`add_isaac_static` / `add_isaac_entity`), or accepts an existing raycaster via `meshes=` to share geometry with raycasting.
-* `query(positions_w [N, n_points, 3], max_dist=...)` → `(closest_pos_w, distances)`.
-* Same `enabled` / `mesh_indices` kwargs as the raycasters. Misses return `max_dist` with `closest_pos_w == positions_w`.
-* Observation wiring (active-adaptation): build the sensor in an obs term `_initialize`, sample probe points each step, call `query`.
+* **Update required** — stub only; see ``MESH_PROXIMITY_UPDATE_REQUIRED``.
+* Planned: closest-point queries with explicit ``mesh_pos_w`` / ``mesh_quat_w``
+  (same pattern as ``MultiMeshRaycaster`` / ``RaycastCamera.render``).
+* In active-adaptation, register geometry via ``MeshRegistry`` first.
 
 ## Raycast Methods
 
-Both raycaster classes implement the same two entry points:
+``MultiMeshRaycaster`` implements two entry points:
 
 | Method | Pipeline | When to prefer |
 | --- | --- | --- |
@@ -124,20 +109,17 @@ Returns `(hit_positions_w [N, n_rays, 3], hit_distances [N, n_rays], hit_normals
 * **Devices**: use `device="cuda"` and keep all tensors on GPU; `device="cpu"` exists only for special debugging and is impractically slow at batch scale.
 * **Warp init**: call `wp.init()` once in the process before first `wp.launch`.
 * **Mesh IDs**: `initialize()` builds `meshes_array` of `wp.uint64` mesh handles; any mesh add invalidates initialization (`initialized = False`).
-* **Static meshes in V2**: geometry must already be in world frame in the trimesh data; runtime pose is identity.
+* **Static meshes**: geometry must already be in world frame in the trimesh data; runtime pose is identity.
 * **G1 assets**: never hardcode machine paths. Use `scripts/g1_assets.py`
   (`SIMPLE_RAYCASTER_G1_XML`, `--xml`, or `assets/unitree_g1/…`).
 * **Style**: 4-space indent, type hints on public APIs (`jaxtyping` shapes in docstrings), keep docstrings focused on non-obvious behavior.
 
 ## Common Pitfalls
 
-1. **V2 mesh/entity mismatch** — calling internal add helpers without `add_isaac_*` leaves `entities` out of sync with `meshes_wp`.
-2. **Prim path layout** — `add_isaac_entity` handles both root-is-first-body
-   (string replace) and container roots like `.../Robot/{body}/visuals`.
-   Matched visual count must equal `entity.num_bodies`, one mesh per body in
-   `body_names` order (never batch-regex + Traverse order).
+1. **Mesh/pose mismatch** — `mesh_pos_w` / `mesh_quat_w` second dim must match registered mesh count.
+2. **Prim path layout** — Isaac body visuals live at `{body}/visuals`; matched count must equal `entity.num_bodies`.
 3. **USD import timing** — `from pxr import Usd` fails before Isaac `AppLauncher` unless standalone `usd-core` is installed.
-4. **Empty raycast** — raycasting with zero registered meshes raises in `_get_mesh_poses_w`.
+4. **Empty raycast** — raycasting with zero registered meshes raises.
 5. **Selective indices shape** — with `mesh_indices`, pose tensors and indices must share the same `[N, n_subset]` mesh dimension.
 6. **Editing Lambert camera for PBR** — put PBR work under `pbr/`; leave `raycast_camera.py` kernels alone unless fixing a shared bug.
 
@@ -175,10 +157,9 @@ There is no `tests/` suite yet. When changing kernels or pose gathering, run `sc
 
 ## Making Changes Safely
 
-* **Kernel edits** — update both fused and non-fused paths in `kernels.py`; keep `raycaster.py` and `raycaster_v2.py` call sites consistent.
-* **V2 registration** — if adding a new registration path, append to `self.entities`, load meshes, then call `_validate_registration()`.
-* **Performance** — prefer `raycast_fused` for fewer intermediate buffers; both methods run on GPU in normal use.
-* **New mesh sources** — add extraction in `utils_*.py`, wire through `MultiMeshRaycaster` factories first; only add V2 support if poses can be sourced automatically.
+* **Kernel edits** — update both fused and non-fused paths in `kernels.py`; keep `raycaster.py` call sites consistent.
+* **Performance** — prefer `raycast_fused` for fewer intermediate buffers.
+* **New mesh sources** — add extraction in `utils_*.py`, wire through `MultiMeshRaycaster` factories.
 * **PBR** — prefer subclassing / `_compose_indirect` hooks over growing `RaycastPBRCamera` kwargs; keep SSGI knobs on `RaycastSSGICamera`.
 
 ## Planned Improvements (Warp Changelog)
@@ -188,7 +169,7 @@ Backlog of performance work to resume later. Re-read the [Warp changelog](https:
 ### Current bottlenecks
 
 * Intermediate buffer `[N, n_meshes, n_rays]` plus PyTorch `.min(dim=1)` after every launch
-* Per-step Python overhead: `wp.from_torch`, empty tensor alloc, V2 pose concat
+* Per-step Python overhead: `wp.from_torch`, empty tensor alloc, pose tensor prep
 * One separate `wp.Mesh` BVH per body; default BVH build settings in `trimesh2wp()`
 * No CUDA graph capture for fixed-shape training loops
 
@@ -197,7 +178,7 @@ Backlog of performance work to resume later. Re-read the [Warp changelog](https:
 - [ ] **Fuse cross-mesh min into the kernel** (Warp `wp.atomic_min`)
   - Launch `(N, n_rays)` (or keep mesh loop inside kernel) and write directly to `[N, n_rays]`
   - Removes ~`n_meshes×` memory and the post-launch PyTorch reduction
-  - Touch: `kernels.py`, `raycaster.py`, `raycaster_v2.py`
+  - Touch: `kernels.py`, `raycaster.py`
   - Note: Warp 1.15+ changes float `wp.min` / `wp.atomic_min` NaN semantics (GH-1376)
 
 - [ ] **Experimental cuBQL mesh BVH** (Warp 1.13+, GH-1286)
@@ -208,7 +189,7 @@ Backlog of performance work to resume later. Re-read the [Warp changelog](https:
 
 - [ ] **CUDA graph capture for training loops** (Warp 1.13+ graph serialization, unreleased `ScopedCapture` mode)
   - Preallocate ray / pose / hit buffers; capture `wp.launch` once, replay each sim step
-  - Best fit: V2 with fixed `N`, `n_rays`, `n_meshes` in Isaac Lab
+  - Best fit: fixed `N`, `n_rays`, `n_meshes` in training loops
   - Use staged capture if buffer addresses change (`GraphMode.WARP_STAGED`, 1.11+)
   - `array.fill_()` graph composability fixed in 1.13 (GH-207 area)
 

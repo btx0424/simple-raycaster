@@ -39,9 +39,9 @@ class RaycastPBRCamera:
     the same ``(rgb, depth, mask)`` shapes so it can be A/B'd against Lambert.
     RGB is ACES-tonemapped LDR; linear HDR is available via ``return_hdr=True``.
 
-    ``render`` / ``render_gbuffer`` take a **pose ticket** (camera + mesh poses)
-    and optional per-call material/light tables. Resolution, quality, HDRI, and
-    textures are camera state (:meth:`set_resolution`, constructor,
+    ``render`` / ``render_gbuffer`` take camera pose plus explicit ``mesh_pos_w`` /
+    ``mesh_quat_w`` from the caller (typically a scene mesh registry). Resolution,
+    quality, HDRI, and textures are camera state (:meth:`set_resolution`, constructor,
     :meth:`set_ground_albedo`) — not ``render`` kwargs.
 
     :meth:`render_sparse` renders a subset of ``tile_size`` tiles
@@ -224,7 +224,39 @@ class RaycastPBRCamera:
         return self.geom.device
 
     def set_resolution(self, width: int, height: int, *, fov_y_deg: float | None = None) -> None:
-        self.geom.set_resolution(width, height, fov_y_deg=fov_y_deg)
+        intr = self.geom.intrinsics
+        self.geom.intrinsics = CameraIntrinsics(
+            width=int(width),
+            height=int(height),
+            fov_y_deg=float(fov_y_deg) if fov_y_deg is not None else intr.fov_y_deg,
+            near=intr.near,
+            far=intr.far,
+            convention=intr.convention,
+            depth_mode=intr.depth_mode,
+            fx=intr.fx,
+            fy=intr.fy,
+            cx=None,
+            cy=None,
+        )
+
+    def _require_mesh_poses(
+        self,
+        n: int,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mesh_pos, mesh_quat = mesh_pos_w, mesh_quat_w
+        if mesh_pos.shape[0] != n or mesh_pos.shape[1] != self.geom.n_meshes:
+            raise ValueError(
+                f"mesh_pos_w shape {tuple(mesh_pos.shape)} incompatible with "
+                f"N={n}, n_meshes={self.geom.n_meshes}"
+            )
+        if mesh_quat.shape != mesh_pos.shape[:-1] + (4,):
+            raise ValueError(
+                f"mesh_quat_w shape {tuple(mesh_quat.shape)} incompatible with "
+                f"mesh_pos_w shape {tuple(mesh_pos.shape)}"
+            )
+        return mesh_pos.contiguous(), mesh_quat.contiguous()
 
     def bind_trimeshes(
         self,
@@ -234,8 +266,6 @@ class RaycastPBRCamera:
         roughness: Sequence | torch.Tensor | float | None = None,
         metallic: Sequence | torch.Tensor | float | None = None,
         names: Sequence[str] | None = None,
-        pose_entity: Any | None = None,
-        pose_body_ids: Sequence[int] | None = None,
     ) -> None:
         kept: list[trimesh.Trimesh] = []
         kept_idx: list[int] = []
@@ -256,9 +286,7 @@ class RaycastPBRCamera:
         else:
             self._mesh_names = [""] * len(kept)
 
-        self.geom.bind_trimeshes(
-            meshes, albedos=albedos, pose_entity=pose_entity, pose_body_ids=pose_body_ids
-        )
+        self.geom.bind_trimeshes(meshes, albedos=albedos)
         self._pack_from_trimeshes(kept)
         n = self.geom.n_meshes
         base_alb = self.geom._albedo_t
@@ -746,10 +774,8 @@ class RaycastPBRCamera:
         cam_pos_w: torch.Tensor,
         cam_quat_wxyz: torch.Tensor,
         *,
-        mesh_pos_w: torch.Tensor | None = None,
-        mesh_quat_w: torch.Tensor | None = None,
-        origin_w: torch.Tensor | None = None,
-        env_ids: torch.Tensor | None = None,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Closest-hit G-buffer for a pose ticket.
 
@@ -774,13 +800,7 @@ class RaycastPBRCamera:
         fx, fy, cx, cy = self.intrinsics.resolved_k()
         convention = 0 if self.intrinsics.convention == "opencv" else 1
         depth_mode = 0 if self.intrinsics.depth_mode == "planar" else 1
-        mesh_pos, mesh_quat = self.geom._gather_mesh_poses(
-            n,
-            mesh_pos_w=mesh_pos_w,
-            mesh_quat_w=mesh_quat_w,
-            origin_w=origin_w,
-            env_ids=env_ids,
-        )
+        mesh_pos, mesh_quat = self._require_mesh_poses(n, mesh_pos_w, mesh_quat_w)
         self._last_mesh_pos = mesh_pos
         self._last_mesh_quat = mesh_quat
         self._last_cam_pos = cam_pos_w.contiguous()
@@ -852,10 +872,8 @@ class RaycastPBRCamera:
         cam_pos_w: torch.Tensor,
         cam_quat_wxyz: torch.Tensor,
         *,
-        mesh_pos_w: torch.Tensor | None = None,
-        mesh_quat_w: torch.Tensor | None = None,
-        origin_w: torch.Tensor | None = None,
-        env_ids: torch.Tensor | None = None,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
         albedo: Sequence | torch.Tensor | None = None,
         roughness: Sequence | torch.Tensor | float | None = None,
         metallic: Sequence | torch.Tensor | float | None = None,
@@ -886,8 +904,6 @@ class RaycastPBRCamera:
             cam_quat_wxyz,
             mesh_pos_w=mesh_pos_w,
             mesh_quat_w=mesh_quat_w,
-            origin_w=origin_w,
-            env_ids=env_ids,
         )
         sun = self._sun_dir_t
 
@@ -1038,10 +1054,8 @@ class RaycastPBRCamera:
         *,
         tiles: torch.Tensor,
         tile_size: int,
-        mesh_pos_w: torch.Tensor | None = None,
-        mesh_quat_w: torch.Tensor | None = None,
-        origin_w: torch.Tensor | None = None,
-        env_ids: torch.Tensor | None = None,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Closest-hit G-buffer for selected tiles only.
 
@@ -1068,13 +1082,7 @@ class RaycastPBRCamera:
         fx, fy, cx, cy = self.intrinsics.resolved_k()
         convention = 0 if self.intrinsics.convention == "opencv" else 1
         depth_mode = 0 if self.intrinsics.depth_mode == "planar" else 1
-        mesh_pos, mesh_quat = self.geom._gather_mesh_poses(
-            n,
-            mesh_pos_w=mesh_pos_w,
-            mesh_quat_w=mesh_quat_w,
-            origin_w=origin_w,
-            env_ids=env_ids,
-        )
+        mesh_pos, mesh_quat = self._require_mesh_poses(n, mesh_pos_w, mesh_quat_w)
         self._last_mesh_pos = mesh_pos
         self._last_mesh_quat = mesh_quat
         self._last_cam_pos = cam_pos_w.contiguous()
@@ -1150,10 +1158,8 @@ class RaycastPBRCamera:
         *,
         tiles: torch.Tensor,
         tile_size: int,
-        mesh_pos_w: torch.Tensor | None = None,
-        mesh_quat_w: torch.Tensor | None = None,
-        origin_w: torch.Tensor | None = None,
-        env_ids: torch.Tensor | None = None,
+        mesh_pos_w: torch.Tensor,
+        mesh_quat_w: torch.Tensor,
         albedo: Sequence | torch.Tensor | None = None,
         roughness: Sequence | torch.Tensor | float | None = None,
         metallic: Sequence | torch.Tensor | float | None = None,
@@ -1193,8 +1199,6 @@ class RaycastPBRCamera:
             tile_size=tile_size,
             mesh_pos_w=mesh_pos_w,
             mesh_quat_w=mesh_quat_w,
-            origin_w=origin_w,
-            env_ids=env_ids,
         )
         sun = self._sun_dir_t
         n_cam = cam_pos_w.shape[0]
