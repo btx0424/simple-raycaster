@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.1] - 2026-09-03
+
+### Added
+
+- **USD primitive tessellation** — ``utils_usd`` now converts ``Sphere``,
+  ``Cylinder``, ``Capsule``, and ``Cone`` (in addition to ``Mesh`` / ``Cube``)
+  via ``trimesh.creation.*``, with USD ``axis`` remapping for cylinders/capsules/cones.
+- **``UsdGeomPart`` / ``get_geom_parts_from_prim``** — per-child geom descriptors with
+  body-local pose, tessellated mesh, and optional Viser-native params
+  (``box`` / ``sphere`` / ``cylinder``). Capsule and Cone remain tessellation-only.
+
 ## [0.4.0] - 2026-09-03
 
 ### Added
@@ -71,5 +82,6 @@ All notable changes to this project are documented here.
 
 - PBR camera, HDRI IBL, FXAA/SSAO, SSGI camera, mesh table materials, and related benches.
 
+[0.4.1]: https://github.com/btx0424/simple-raycaster/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/btx0424/simple-raycaster/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/btx0424/simple-raycaster/compare/v0.2.1...v0.3.0
