@@ -105,10 +105,12 @@ class RaycastCamera:
         self.outputs = tuple(outputs)
         if isinstance(device, torch.device):
             self.torch_device = device
-            self.device = str(device)
-        else:
-            self.device = device
+            self.device = wp.get_device(str(device))
+        elif isinstance(device, str):
+            self.device = wp.get_device(device)
             self.torch_device = torch.device(device)
+        else:
+            raise ValueError(f"Invalid device: {device}")
         self.ambient = float(ambient)
         self.diffuse = float(diffuse)
         self.light_dir = tuple(float(x) for x in light_dir)
