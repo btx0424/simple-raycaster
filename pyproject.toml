@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simple-raycaster"
-version = "0.4.1"
+version = "0.4.2"
 description = "A simple raycaster based on warp. Supports multiple and dynamic meshes."
 authors = [
     { name="Botian Xu", email="botianxu@gmail.com" }

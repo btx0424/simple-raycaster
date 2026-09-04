@@ -406,6 +406,63 @@ def raycast_camera_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def raycast_camera_per_mesh_kernel(
+    meshes: wp.array(dtype=wp.uint64),
+    mesh_pos_w: wp.array(dtype=wp.vec3, ndim=2),  # [N, M]
+    mesh_quat_w: wp.array(dtype=wp.vec4, ndim=2),  # [N, M] WXYZ
+    cam_pos_w: wp.array(dtype=wp.vec3, ndim=1),  # [N]
+    cam_quat_w: wp.array(dtype=wp.vec4, ndim=1),  # [N] WXYZ
+    width: int,
+    height: int,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    near: float,
+    far: float,
+    convention: int,  # 0 = OpenCV (+Z fwd), 1 = OpenGL (−Z fwd)
+    hit_distances: wp.array(dtype=wp.float32, ndim=3),  # [N, M, H*W]
+    hit_normals: wp.array(dtype=wp.vec3, ndim=3),  # [N, M, H*W] world
+):
+    """Parallel-over-mesh camera raycast. One thread per (env, mesh, pixel).
+
+    Writes per-mesh hit ``t`` / world normal; misses store ``far`` and zero normal.
+    Caller reduces with ``min`` over the mesh axis (see ``RaycastCamera`` with
+    ``closest_hit=False``). No tmax shrinking across meshes.
+    """
+    n, mesh_id, pix = wp.tid()
+    px = pix % width
+    py = pix // width
+
+    u = (float(px) + 0.5 - cx) / fx
+    v = (float(py) + 0.5 - cy) / fy
+    if convention == 0:
+        dir_c = wp.normalize(wp.vec3(u, v, 1.0))
+    else:
+        dir_c = wp.normalize(wp.vec3(u, -v, -1.0))
+
+    cq = cam_quat_w[n]
+    cq_xyzw = wp.quat(cq[1], cq[2], cq[3], cq[0])
+    origin = cam_pos_w[n]
+    dir_w = wp.quat_rotate(cq_xyzw, dir_c)
+
+    mq = mesh_quat_w[n, mesh_id]
+    mq_xyzw = wp.quat(mq[1], mq[2], mq[3], mq[0])
+    mpos = mesh_pos_w[n, mesh_id]
+    ray_o_b = wp.quat_rotate_inv(mq_xyzw, origin - mpos)
+    ray_d_b = wp.quat_rotate_inv(mq_xyzw, dir_w)
+    result = wp.mesh_query_ray(meshes[mesh_id], ray_o_b, ray_d_b, far)
+
+    t = float(far)
+    normal_w = wp.vec3(0.0, 0.0, 0.0)
+    if result.result and result.t >= near and result.t < far:
+        t = result.t
+        normal_w = wp.quat_rotate(mq_xyzw, result.normal)
+    hit_distances[n, mesh_id, pix] = t
+    hit_normals[n, mesh_id, pix] = normal_w
+
+
+@wp.kernel(enable_backward=False)
 def transform_and_query_point_against_meshes_kernel(
     meshes: wp.array(dtype=wp.uint64),
     mesh_indices: wp.array(dtype=wp.int64, ndim=2),

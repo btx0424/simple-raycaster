@@ -30,7 +30,7 @@ Both methods return `(hit_positions, hit_distances, hit_normals)`. Normals are w
 
 | Class | Role |
 | --- | --- |
-| `RaycastCamera` | Lambert RGB-D megakernel (kept stable for GS compositing A/B). |
+| `RaycastCamera` | Lambert RGB-D. Default in-kernel mesh loop; `closest_hit=False` for parallel-over-M A/B. |
 | `RaycastPBRCamera` | Standalone G-buffer + PyTorch GGX / HDRI / ACES; optional SSAO, shadows, FXAA. |
 | `RaycastSSGICamera` | Same as PBR, but tiled SSGI replaces SSAO. |
 

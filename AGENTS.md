@@ -47,8 +47,12 @@ Public exports include raycasters, `RaycastCamera`, `RaycastPBRCamera`,
 * Shared API shape: register / bind body-local meshes, then
   `render(cam_pos, cam_quat, …) → (rgb, depth, mask)` (OpenCV convention).
 * Prefer `make_mesh_rgbd_renderer("diffrast"|"raycast")` for multi-entity use.
+* **`closest_hit`** (construction): `True` (default) loops meshes in-kernel with
+  shrinking tmax; `False` launches parallel-over-M then PyTorch `min` (A/B /
+  memory tradeoff — see `_optimization.md`).
 * **Hard rule:** do not change Lambert `RaycastCamera` / `raycast_camera_kernel`
-  behavior when extending PBR — keep it for GS compositing A/B.
+  behavior when extending PBR — keep it for GS compositing A/B. The parallel
+  path is an opt-in constructor flag only.
 
 ### PBR camera (`pbr/`)
 

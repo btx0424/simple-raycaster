@@ -1459,7 +1459,7 @@ wheels = [
 
 [[package]]
 name = "simple-raycaster"
-version = "0.1.0"
+version = "0.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "fast-simplification", version = "0.1.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },

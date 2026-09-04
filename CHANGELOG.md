@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.2] - 2026-09-04
+
+### Added
+
+- **`RaycastCamera(closest_hit=False)`** — parallel-over-mesh launch
+  ``(N, n_meshes, H*W)`` via ``raycast_camera_per_mesh_kernel``, then PyTorch
+  ``min`` + Lambert shade. Default remains in-kernel mesh loop with shrinking
+  tmax (``closest_hit=True``). Higher peak memory; for A/B vs the serial path.
+- **`simple_raycaster.__version__`** — from package metadata (fallback ``0.4.2``
+  when the distribution is not installed).
+
 ## [0.4.1] - 2026-09-03
 
 ### Added
@@ -82,6 +93,7 @@ All notable changes to this project are documented here.
 
 - PBR camera, HDRI IBL, FXAA/SSAO, SSGI camera, mesh table materials, and related benches.
 
+[0.4.2]: https://github.com/btx0424/simple-raycaster/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/btx0424/simple-raycaster/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/btx0424/simple-raycaster/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/btx0424/simple-raycaster/compare/v0.2.1...v0.3.0
