@@ -260,7 +260,7 @@ hit_positions, hit_distances, hit_normals = raycaster.raycast_fused(
 * `scripts/bench_tiled_filters.py` — Torch eager / `torch.compile` vs Warp tiled FXAA/SSAO
 * `scripts/orbit_g1_video.py` — depth / Lambert / PBR orbit MP4s
 * `scripts/demo_batched_materials.py` — one batched ``render`` with per-env albedo/rough/metal/sun/exposure
-* `scripts/bench_g1_camera.py` — G1 lidar + camera scene benchmark
+* `scripts/bench_g1_camera.py` — G1 lidar + camera scene benchmark; `--sweep-bvh` recommends `bvh_constructor` / `bvh_leaf_size`
 
 G1 MJCF is **not** vendored. Resolve it with (in order) `--xml`, env `SIMPLE_RAYCASTER_G1_XML`, or a file at `assets/unitree_g1/g1_29dof_rev_1_0_with_inspire_hand_DFQ.xml` (also checks a sibling `../object_hoi/src/assets/unitree_g1/` layout). See `scripts/g1_assets.py`.
 

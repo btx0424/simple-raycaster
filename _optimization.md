@@ -67,10 +67,13 @@ Same G1 scene. Closest-hit output buffers are now reused on the raycaster.
 | `bvh_constructor=median` | 2.17 ms (worse) | — | no |
 | merge ground+cube | 1.70 vs 1.78 ms (~4.5%) | — | scene tip only; under 5% |
 
-`launch_bounds` / `bvh_leaf_size` / cuBQL need Warp ≥ 1.9 / 1.11 / 1.13.
+`launch_bounds` / cuBQL need Warp ≥ 1.11 / 1.13. `bvh_leaf_size` is available on Warp ≥ 1.9 (including this host’s 1.11).
 
 ```bash
-.venv/bin/python scripts/bench_g1_camera.py --graph --sweep-bvh --skip-unfused
+# Staged BVH recommendation: constructors @ default leaf, then leaf sizes @ best ctor
+# Times both MultiMeshRaycaster (lidar closest) and RaycastCamera.
+python scripts/bench_g1_camera.py --sweep-bvh --skip-legacy --skip-unfused
+python scripts/bench_g1_camera.py --sweep-bvh --sweep-bvh-mode full --json-out /tmp/bvh.json
 ```
 
 `raycast_fused(..., closest_hit=True)` is the new default. Keep

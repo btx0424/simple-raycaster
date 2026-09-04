@@ -19,6 +19,7 @@ _RELATIVE_CANDIDATES = (
     Path("assets") / "unitree_g1" / G1_XML_NAME,
     Path("..") / "object_hoi" / "src" / "assets" / "unitree_g1" / G1_XML_NAME,
     Path("..") / ".." / "object_hoi" / "src" / "assets" / "unitree_g1" / G1_XML_NAME,
+    Path("..") / "aa-projects" / "object_hoi" / "src" / "assets" / "unitree_g1" / G1_XML_NAME,
 )
 
 

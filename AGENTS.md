@@ -185,11 +185,10 @@ Backlog of performance work to resume later. Re-read the [Warp changelog](https:
   - Touch: `kernels.py`, `raycaster.py`
   - Note: Warp 1.15+ changes float `wp.min` / `wp.atomic_min` NaN semantics (GH-1376)
 
-- [ ] **Experimental cuBQL mesh BVH** (Warp 1.13+, GH-1286)
-  - Add optional `bvh_constructor="cubql"` to `helpers.trimesh2wp()` / mesh factories
-  - Only supports `wp.mesh_query_ray()` — matches our kernels
-  - Benchmark vs default; keep fallback while experimental
-  - Unreleased fix for cuBQL on devices without memory pools (GH-1430)
+- [x] **Experimental cuBQL mesh BVH** (Warp 1.13+, GH-1286)
+  - Optional `bvh_constructor="cubql"` in `helpers.trimesh2wp()` / mesh factories
+  - Probe + sweep via `scripts/bench_g1_camera.py --sweep-bvh` (skipped if Warp rejects `cubql`)
+  - Keep fallback while experimental; unreleased fix for devices without memory pools (GH-1430)
 
 - [ ] **CUDA graph capture for training loops** (Warp 1.13+ graph serialization, unreleased `ScopedCapture` mode)
   - Preallocate ray / pose / hit buffers; capture `wp.launch` once, replay each sim step
@@ -199,8 +198,10 @@ Backlog of performance work to resume later. Re-read the [Warp changelog](https:
 
 ### Priority 2 — tune after P1
 
-- [ ] **`bvh_leaf_size` on `wp.Mesh`** (Warp 1.9+, GH-994)
-  - Expose in `trimesh2wp()`; sweep in `advanced.py` (default is 4)
+- [x] **`bvh_leaf_size` on `wp.Mesh`** (Warp 1.9+, GH-994)
+  - Exposed in `trimesh2wp()` / `MultiMeshRaycaster` / `RaycastCamera`
+  - Sweep + recommendation: `python scripts/bench_g1_camera.py --sweep-bvh --skip-legacy --skip-unfused`
+  - Modes: `--sweep-bvh-mode staged|constructors|leaf|full`
 
 - [ ] **Launch tuning** (Warp 1.11+ / 1.13+)
   - `@wp.kernel(launch_bounds=...)` (GH-1049)
